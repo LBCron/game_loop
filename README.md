@@ -510,8 +510,8 @@ the watchdog. The contract is three-valued:
 
 | Exit | Meaning |
 |---|---|
-| `0` | Waiting. The watchdog stays quiet. |
-| `1` | Not waiting — there is work here. The watchdog rings. |
+| `0` | Waiting. The watchdog stays quiet **and keeps watching**: it re-runs the probe every `idle_sec`, and rings when the wait ends. |
+| `1` | Not waiting — there is work here. The watchdog rings, and the ring quotes the first line the probe printed (stderr, or stdout if stderr is empty), so print what the run should do next. |
 | anything else, a timeout, or an unrunnable command | **Could not answer.** Still rings, *and* `status` reports the probe as FAILING. |
 
 **Say what your probe's budget is.** `watchdog.waiting_probe_timeout_sec` (default `15`, env
@@ -522,6 +522,14 @@ like a broken one. Reported from the consumer seat in #124: the recommended comm
 against a budget that was not written down anywhere, every tick timed out for six days, and three
 runs died unnoticed. A timeout now says it timed out and names this key, rather than reporting that
 the probe did not run — those send you to completely different repairs.
+
+**A wait is held, not glanced at.** The watchdog used to look once and exit, so when a wait ended
+later, nothing rang: a lost "I'm done" message or a Crawler that blocked an hour in left the run asleep
+until a human looked. It now stays alive for as long as the probe says waiting, at no token cost because
+only a ring wakes the model. A hold ends quietly if the session goes back to work, the mandate is
+released or parked, a T3 is armed, a newer watchdog takes over, or the process that started it has
+exited. Each hold's end is logged as `watchdog_hold_end` with its cause and length. Repeat verdicts are
+thinned to one log line per 30 minutes.
 
 That third state exists because a probe that crashed and a probe reporting work produced identical
 output, so a broken one stayed invisible for exactly as long as there was work to do. Write yours to

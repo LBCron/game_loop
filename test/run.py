@@ -220,6 +220,10 @@ class _TimedOut:
 
 
 def run_watchdog(wd_bin, payload, **env):
+    # ONE LOOK, UNLESS A TEST ASKS FOR THE HOLD. A probe saying "waiting" now keeps the process alive
+    # until the wait ends, which is correct in production and a 30-second timeout here. The tests
+    # that drive the hold itself use Popen and leave this unset.
+    env.setdefault("WATCHDOG_HOLD_MAX_SEC", "0")
     try:
         return subprocess.run([wd_bin], input=json.dumps(payload), capture_output=True, text=True,
                               timeout=WATCHDOG_TIMEOUT_SEC, env=_env(**env))
@@ -8000,6 +8004,309 @@ def main():
     finally:
         shutil.rmtree(wp, ignore_errors=True)
 
+    # ONE LOOK WAS NOT A WAIT. The watchdog used to exit at the first "waiting" verdict, so a wait that
+    # ended afterwards rang nobody: a lost close message, a dead waker and a Crawler that blocked an
+    # hour in all left the run asleep, and all of them looked like a healthy wait. Driven through a
+    # real process and Popen, because the behaviour under test is that the process is STILL THERE.
+    print("watchdog: a declared wait is held for as long as it verifies, and its end rings:")
+    hw = make_sandbox()
+    _hold_live = []
+    try:
+        _hwl = os.path.join(hw, ".game_loop", "log.jsonl")
+        _hws = os.path.join(hw, ".game_loop", "sessions", "sess-hold")
+        os.makedirs(_hws, exist_ok=True)
+        _hwt = os.path.join(hw, "transcript.jsonl")
+        _hwf = os.path.join(hw, "crawler-alive")
+        _hwbin = os.path.join(hw, ".game_loop", "bin", "watchdog")
+        _hwpay = json.dumps({"session_id": "sess-hold", "transcript_path": _hwt})
+        _hwprobe = (f'[ -f "{_hwf}" ] && {{ echo two crawlers live; exit 0; }}; '
+                    'echo "a Crawler is BLOCKED" >&2; exit 1')
+
+        def _hwcfg(probe):
+            with open(os.path.join(hw, ".game_loop", "config.local.json"), "w") as f:
+                json.dump({"watchdog": {"waiting_probe": probe} if probe else {}}, f)
+
+        def _hwset(**extra):
+            with open(os.path.join(_hws, "state.json"), "w") as f:
+                json.dump({"mandate": {"active": True, "text": "land the leaf", "at": "now"},
+                           "watchdog_rings": 0, "watchdog_last_ring_size": 0, **extra}, f)
+            open(_hwl, "w").close()
+            with open(_hwt, "w") as f:
+                f.write("{}\n")
+            with open(_hwf, "w"):
+                pass
+
+        def _hwstart(**envx):
+            pr = subprocess.Popen([_hwbin], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.PIPE, text=True,
+                                  env=_env(WATCHDOG_IDLE_SEC="1", WATCHDOG_SETTLE_SEC="0", **envx))
+            pr.stdin.write(_hwpay)
+            pr.stdin.close()
+            _hold_live.append(pr)
+            return pr
+
+        def _hwlog(needle):
+            """Poll: the log is the only view of a process somebody else has reparented."""
+            for _ in range(60):
+                if needle in read_or_empty(_hwl):
+                    return True
+                time.sleep(0.25)
+            return False
+
+        def _hwend(pr):
+            try:
+                return pr.wait(timeout=WATCHDOG_TIMEOUT_SEC)
+            except subprocess.TimeoutExpired:
+                pr.kill()
+                return None
+
+        _hwcfg(_hwprobe)
+        _hwset()
+        _p = _hwstart()
+        time.sleep(4)
+        _still = _p.poll() is None
+        _lines = read_or_empty(_hwl)
+        check("a run whose probe says WAITING keeps a live watchdog past the first look — it used to "
+              "be gone by now, which is the reported gap",
+              _still and '"watchdog_hold_end"' not in _lines)
+        check("...and holding is SILENT: no ring while the wait verifies",
+              '"watchdog_ring"' not in _lines)
+        check("...and a repeating verdict is not a log line per tick, which a two-hour fan-out would "
+              "turn into hundreds of identical rows",
+              _lines.count('"watchdog_waiting"') == 1)
+        os.remove(_hwf)
+        _rc = _hwend(_p)
+        _err = _p.stderr.read() if _rc is not None else ""
+        check("the wait ending RINGS — the backstop for a close message that never arrived",
+              _rc == 2 and '"watchdog_ring"' in read_or_empty(_hwl))
+        check("...and the ring QUOTES THE PROBE, since a blocked Crawler needs a message and the "
+              "generic GO says to run the next thing",
+              "a Crawler is BLOCKED" in _err and "has ended" in _err)
+        check("...and the hold's end is on the record with its length and its cause, so 'how long "
+              "did this hold, and why did it stop' is a fact",
+              '"held_sec"' in read_or_empty(_hwl)
+              and "the probe stopped saying waiting" in read_or_empty(_hwl))
+        with open(os.path.join(_hws, "state.json")) as f:
+            check("...and it is COUNTED as a ring, so the cap still sees it",
+                  json.load(f).get("watchdog_rings") == 1)
+
+        # EVERY OTHER WAY OUT IS SILENT. A hold that ignored these would ring a session the human had
+        # paused, or wake a run the human is answering.
+        for _nm, _mut, _needle in (
+                ("the mandate released", {"mandate": {"active": False}}, "mandate released during a hold"),
+                ("the human calling a break",
+                 {"mandate": {"active": True, "text": "x", "at": "now", "parked": True}},
+                 "the human called a break during a hold"),
+                ("a T3 arm", {"t3_armed": {"question": "q"}}, "T3 armed during a hold")):
+            _hwset()
+            _p = _hwstart()
+            _hwlog('"watchdog_waiting"')
+            with open(os.path.join(_hws, "state.json")) as f:
+                _st = json.load(f)
+            _st.update(_mut)
+            with open(os.path.join(_hws, "state.json"), "w") as f:
+                json.dump(_st, f)
+            _rc = _hwend(_p)
+            check(f"{_nm} during a hold ends it without a ring, re-read on the tick rather than "
+                  "decided at arm time",
+                  _rc == 0 and _needle in read_or_empty(_hwl)
+                  and '"watchdog_ring"' not in read_or_empty(_hwl))
+
+        _hwset()
+        _p = _hwstart()
+        _hwlog('"watchdog_waiting"')
+        with open(_hwt, "a") as f:
+            f.write('{"more": 1}\n')
+        _rc = _hwend(_p)
+        check("a session that goes back to work ends the hold quietly — its own next turn-end arms a "
+              "new watchdog, and this one must not ring it mid-turn",
+              _rc == 0 and "the session went back to work during a hold" in read_or_empty(_hwl)
+              and '"watchdog_ring"' not in read_or_empty(_hwl))
+
+        _hwset()
+        _p1 = _hwstart()
+        _hwlog('"watchdog_waiting"')
+        _p2 = _hwstart()
+        _rc1 = _hwend(_p1)
+        check("a newer watchdog supersedes a hold — newest wins, as it always has, and the old one "
+              "does not ring on its way out",
+              _rc1 is not None and _rc1 != 2 and _p2.poll() is None)
+        _p2.kill()
+        _p2.wait()
+
+        # THE COST OF LIVING FOR HOURS. Without this every closed session leaves a process running its
+        # probe for up to the hook timeout. The shell stays as the parent, as a hook's does; the
+        # control is the assertion above that a hold under a live chain stays alive.
+        _hwset()
+        _pay_f = os.path.join(hw, "payload.json")
+        with open(_pay_f, "w") as f:
+            f.write(_hwpay)
+        _owner = subprocess.Popen(
+            ["bash", "-c", f'bash -c \'"{_hwbin}" < "{_pay_f}"\' & wait'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=_env(WATCHDOG_IDLE_SEC="1", WATCHDOG_SETTLE_SEC="0"))
+        _hold_live.append(_owner)
+        _armed = _hwlog('"watchdog_waiting"')
+        _owner.kill()
+        _owner.wait()
+        check("a hold whose session has gone stands down rather than polling for days, even with a "
+              "shell still parked between it and the dead owner",
+              _armed and _hwlog("the session that started this hold is gone")
+              and '"watchdog_ring"' not in read_or_empty(_hwl))
+
+        _hwset()
+        _rc = _hwend(_hwstart(WATCHDOG_HOLD_MAX_SEC="2"))
+        check("a hold has a bound, so an owner it cannot see still ends — logged as the bound, not "
+              "dressed up as the wait finishing",
+              _rc == 0 and "reached its bound" in read_or_empty(_hwl))
+
+        # THE SAME GAP AT THE MOST EXPENSIVE PLACE: the path that decides whether to page the human.
+        _hwset(watchdog_rings=99, watchdog_last_ring_size=10 ** 9)
+        _p = _hwstart()
+        _armed = _hwlog('"watchdog_wait_held"')
+        time.sleep(2)
+        check("at the ring cap a verifying wait is HELD, not merely skipped: alive and not paging",
+              _armed and _p.poll() is None and '"watchdog_exhausted"' not in read_or_empty(_hwl))
+        os.remove(_hwf)
+        _hwend(_p)
+        check("...and when that wait ends the cap's stand-down DOES happen — a run already at the cap "
+              "used to be left unwatched for the rest of the wait",
+              '"watchdog_exhausted"' in read_or_empty(_hwl))
+
+        # THE REASON ON A PLAIN RING: no hold involved, because the probe never said waiting.
+        _hwset()
+        _hwcfg("echo reason-on-stdout; exit 1")
+        _r = run_watchdog(_hwbin, json.loads(_hwpay), WATCHDOG_IDLE_SEC="1", WATCHDOG_SETTLE_SEC="0")
+        check("a first-look NOT WAITING rings with the reason too, read from stdout when stderr has "
+              "none, and does not claim a wait ended",
+              _r.returncode == 2 and "waiting probe : reason-on-stdout" in _r.stderr
+              and "has ended" not in _r.stderr)
+        _hwset()
+        _hwcfg("exit 1")
+        _r = run_watchdog(_hwbin, json.loads(_hwpay), WATCHDOG_IDLE_SEC="1", WATCHDOG_SETTLE_SEC="0")
+        check("...and a probe with nothing to say is reported as saying nothing",
+              _r.returncode == 2 and "gave no reason" in _r.stderr)
+        _hwset()
+        _hwcfg(None)
+        _r = run_watchdog(_hwbin, json.loads(_hwpay), WATCHDOG_IDLE_SEC="1", WATCHDOG_SETTLE_SEC="0")
+        check("...while with no probe configured the ring has no such line — and it IS a ring, so "
+              "that absence is not the absence of a message",
+              _r.returncode == 2 and "GO —" in _r.stderr and "waiting probe" not in _r.stderr)
+    finally:
+        for _pr in _hold_live:
+            if _pr.poll() is None:
+                _pr.kill()
+                _pr.wait()
+            if _pr.stderr:
+                _pr.stderr.close()
+        shutil.rmtree(hw, ignore_errors=True)
+
+    # A SESSION'S RECORD LIVES WHERE ITS HOOKS RUN. An orchestrator running from the main checkout can
+    # `cd` into a worktree to land a merge, and `./.game_loop/bin/game_loop` is then that worktree's
+    # provisioned copy. `attribute` printed "✓ ATTRIBUTED" into the worktree's state, the commit gate
+    # read the main checkout's, and all 46 merged files were listed as never edited.
+    print("a worktree's copy of game_loop keeps a main-checkout session's record in the main checkout:")
+    sh = make_sandbox()
+    try:
+        with open(os.path.join(sh, ".game_loop", "verify.yaml"), "w") as f:
+            f.write("")
+        with open(os.path.join(sh, ".gitignore"), "w") as f:
+            f.write("__pycache__/\n.game_loop/\nworktrees/\n")
+
+        def _shg(cwd, *args):
+            return subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+                                   "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+                                   *args], cwd=cwd, capture_output=True, text=True)
+
+        def _shw(root, rel):
+            full = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write(rel + "\n")
+
+        _shw(sh, "README.md")
+        _shg(sh, "init", "-q")
+        _shg(sh, "add", "-A")
+        _shg(sh, "commit", "-qm", "base")
+        _shwt = os.path.join(os.path.realpath(sh), "worktrees", "camp")
+        _shg(sh, "worktree", "add", "-qb", "campaign", _shwt)
+        # Provisioned the way showrunner does it: the code and rules, with no runtime state.
+        shutil.copytree(os.path.join(sh, ".game_loop"), os.path.join(_shwt, ".game_loop"),
+                        ignore=shutil.ignore_patterns("sessions", "__pycache__", "log.jsonl"))
+        _shg(_shwt, "checkout", "-qb", "crawler/x")
+        for _i in range(3):
+            _shw(_shwt, f"docs/f{_i}.md")
+        _shg(_shwt, "add", "-A")
+        _shg(_shwt, "commit", "-qm", "crawl")
+        _shg(_shwt, "checkout", "-q", "campaign")
+
+        def _shrun(home, cwd, *args, sid="sess-orch", **envx):
+            return subprocess.run([os.path.join(home, ".game_loop", "bin", "game_loop"), *args],
+                                  cwd=cwd, capture_output=True, text=True, env=_env(sid=sid, **envx))
+
+        def _shstate(home, sid):
+            try:
+                with open(os.path.join(home, ".game_loop", "sessions", sid, "state.json")) as f:
+                    return json.load(f)
+            except (OSError, ValueError):
+                return {}
+
+        # The session's first guarded call, from the main checkout's hook: its own edit, in the tree.
+        guard(sh, {"tool_name": "Write", "session_id": "sess-orch", "cwd": _shwt,
+                   "tool_input": {"file_path": os.path.join(_shwt, "mine.md")}}, sid="sess-orch")
+        _shw(_shwt, "mine.md")
+        _shg(_shwt, "merge", "--no-commit", "--no-ff", "crawler/x")
+        _shg(_shwt, "add", "mine.md")
+        _r = _shrun(_shwt, _shwt, "attribute", "--merge", "crawler/x", "--reason", "landing the leaf")
+        check("`attribute` from the worktree's own copy lands in the MAIN checkout's record, the one "
+              "the commit gate reads",
+              _r.returncode == 0 and _shstate(sh, "sess-orch").get("attributed")
+              and not _shstate(_shwt, "sess-orch"))
+        check("...and it SAYS where the record went, since this copy is not where it looks like it "
+              "would be",
+              "its record is kept there" in _r.stderr)
+        _r = guard(sh, {"tool_name": "Bash", "session_id": "sess-orch", "cwd": _shwt,
+                        "tool_input": {"command": "git commit -m x"}}, sid="sess-orch")
+        check("...so the merge's files drop out of the commit's list, which is the reported failure",
+              "NEVER EDITED" not in _r.stdout and "worktrees/camp/docs/f0.md" not in _r.stdout)
+        _shrun(sh, sh, "mandate", "--set", "land the leaf", "--because", "the human asked for this")
+        check("...and it holds for every verb, not the one that was reported: `status` from that copy "
+              "reads the same mandate",
+              "land the leaf" in _shrun(_shwt, _shwt, "status").stdout)
+
+        # THE CRAWLER CONTROLS. Each of these staying local is what makes the move above a verdict
+        # rather than a blanket rule, and a Crawler's state is per-tree on purpose.
+        guard(_shwt, {"tool_name": "Write", "session_id": "sess-crawl", "cwd": _shwt,
+                      "tool_input": {"file_path": os.path.join(_shwt, "c.md")}}, sid="sess-crawl")
+        _r = _shrun(_shwt, _shwt, "attribute", "--merge", "crawler/x", "--reason", "r", sid="sess-crawl")
+        check("a Crawler, whose hooks run from its own worktree, keeps its record in that worktree",
+              _r.returncode == 0 and _shstate(_shwt, "sess-crawl").get("attributed")
+              and not _shstate(sh, "sess-crawl") and "its record is kept there" not in _r.stderr)
+        os.makedirs(os.path.join(sh, ".game_loop", "sessions", "sess-stray"), exist_ok=True)
+        _shrun(_shwt, _shwt, "attribute", "--merge", "crawler/x", "--reason", "r", sid="sess-stray")
+        check("a bare session directory in the main checkout is not evidence: this defect leaves "
+              "exactly such directories behind, and only a hook's mark says who owns the session",
+              _shstate(_shwt, "sess-stray").get("attributed")
+              and not _shstate(sh, "sess-stray"))
+        _r = _shrun(_shwt, _shwt, "status", sid=None)
+        check("with no session id there is nothing to move, so the copy stays its own home",
+              "its record is kept there" not in _r.stderr)
+
+        # A submodule's .git is also a file, and pointing at modules/ makes it a different project.
+        _sub = _tmpdir("gl-submodule-")
+        shutil.copytree(os.path.join(sh, ".game_loop"), os.path.join(_sub, "m", "dep", ".game_loop"),
+                        ignore=shutil.ignore_patterns("sessions", "__pycache__"))
+        os.makedirs(os.path.join(_sub, "m", ".git", "modules", "dep"))
+        shutil.copytree(os.path.join(sh, ".game_loop"), os.path.join(_sub, "m", ".game_loop"),
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        with open(os.path.join(_sub, "m", "dep", ".git"), "w") as f:
+            f.write("gitdir: ../.git/modules/dep\n")
+        _r = _shrun(os.path.join(_sub, "m", "dep"), os.path.join(_sub, "m", "dep"), "status")
+        check("a submodule's copy stays its own home even when the parent knows the same session",
+              "its record is kept there" not in _r.stderr)
+    finally:
+        shutil.rmtree(sh, ignore_errors=True)
+
     # A DEPLOY VERB NEEDS A BOUNDARY ON BOTH SIDES (#51). There was one before the verb and none
     # after, so it matched as a SUBSTRING and ordinary English refused the call: "file surgery"
     # contains " surge"; "docker pushed" contains the default verb. The refusal is loud and
@@ -10304,6 +10611,23 @@ def main():
               "`file_ticket` files Jira issues under a shared token, which is why the whole-server "
               "trust was the wrong remedy in the first place",
               _call("mcp__drops-fi__file_ticket")[0] == "deny")
+        _set(mcp_standing_writes=[])
+
+        # A SESSION VERB NO GRANT COULD REACH. A device walkthrough held a whole-server grant and
+        # still spent one hatch use per redeploy, because `connect` was on neither list and standing
+        # writes are consulted only on the mutating branch.
+        for _cv in ("connect", "disconnect"):
+            _cd, _cr = _call("mcp__marionette__" + _cv)
+            check(f"`{_cv}` is CLASSIFIED as a mutation — refused by default as MUTATING rather than "
+                  "as unclassifiable, and not waved through as read-only",
+                  _cd == "deny" and "classified as MUTATING" in _cr)
+        _set(mcp_standing_writes=["mcp__marionette__"])
+        check("...so a whole-server standing grant now covers `connect`, which is the reported case: "
+              "a reconnect after every redeploy no longer spends a hatch use",
+              _call("mcp__marionette__connect")[0] == "allow"
+              and _call("mcp__marionette__disconnect")[0] == "allow")
+        check("...and that grant stays on its own server",
+              _call("mcp__other__connect")[0] == "deny")
         _set(mcp_standing_writes=[])
 
         # THE REMEDY TEXT POINTED AT THE DISHONEST OPTION. The only fix the UNCLASSIFIABLE refusal

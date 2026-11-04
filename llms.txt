@@ -273,7 +273,9 @@ reduces the damage, it does not remove the class.
   ./.game_loop/bin/game_loop attribute --merge <ref> [--merge <ref> ...] --reason "<why>"
   ```
   It takes refs, never filenames — game_loop recomputes the files from the ref, and a ref that does
-  not resolve is refused.
+  not resolve is refused. Run from a worktree with its own .game_loop/, that copy keeps your record
+  where your hooks read it, in the main checkout, and says so on stderr. A Crawler whose hooks run in
+  that worktree keeps its record there.
 
 None of these have an env-var override, by design. The only escape hatch is a human.
 
@@ -392,6 +394,9 @@ never silent — a hook whose verdict came back truncated has judged, and only t
 #   declare for itself is an off switch for its own watchdog, and this verb cannot tell a session
 #   from the orchestrator above it. Arm it in .game_loop/config.local.json — never config.json,
 #   which is a rule file byte-compared between a parent checkout and its worktrees.
+#   ARMED, IT IS A BACKSTOP: while the probe says waiting the watchdog stays alive and re-runs it
+#   every idle_sec, then rings when the wait ends, quoting the probe's reason. So you may checkpoint
+#   and end your turn on a wait even if the message meant to wake you never arrives.
 #   ITS BUDGET IS watchdog.waiting_probe_timeout_sec (default 15, env
 #   WATCHDOG_PROBE_TIMEOUT_SEC). The probe runs on EVERY tick, so the default is small on purpose —
 #   but a probe that is merely SLOW is killed and reads as FAILING, indistinguishable from broken

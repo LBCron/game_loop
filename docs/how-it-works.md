@@ -82,6 +82,17 @@ Guardrails on the watchdog itself:
 - **Ring cap** — after `ring_cap` *consecutive unproductive* rings it stands down (a nag that never
   quits gets ignored). The moment the transcript grows after a ring, the budget resets: the ring
   worked.
+- **A declared wait is held** — when `waiting_probe` says the run is waiting on work it dispatched, the
+  watchdog does not ring, and it does not leave either. It re-runs the probe every `idle_sec` and rings
+  the moment the answer changes, quoting the probe's reason. One look was not enough: it used to exit
+  at the first "waiting", about 30 seconds after the turn ended, and nothing re-armed until a turn-end
+  an idle session never reaches. A lost close message or a Crawler that blocked later therefore rang
+  nobody, and that looked exactly like a healthy wait. The same hold guards the ring cap, so a run at
+  the cap is paged when its wait ends. A hold ends quietly on anything that makes a ring wrong: the
+  transcript growing, the mandate released or parked, a T3 armed, a newer watchdog, or **an ancestor
+  process exiting**, which matters because a process that lives for hours would otherwise outlive
+  every closed session and keep polling. Its limits: an owner it cannot see is bounded only by the
+  7-day hook timeout, and a probe that says "waiting" for ever is believed for ever.
 - **Fails visibly** — every quiet exit logs *why*, so a broken watchdog is distinguishable from a
   correctly-silent one. If the harness ever stops honouring asyncRewake, the last-ring record in
   `game_loop status` is where the silence shows.

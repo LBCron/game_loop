@@ -120,16 +120,89 @@ PINNED_MARK = "PINNED"   # written into a pinned checkout by `game_loop self --p
 PINNED_DIRNAME = ".game_loop_self"   # where `self --pin` puts it, inside the repo, gitignored
 
 
+def sanitize_session(sid):
+    """A session id becomes a directory name — keep it to safe characters, bounded length."""
+    if not isinstance(sid, str) or not sid.strip():
+        return None
+    return re.sub(r"[^A-Za-z0-9._-]", "-", sid.strip())[:64]
+
+
+def env_session():
+    """The session id visible to a CLI invocation (agent-run Bash exports it).
+
+    GAME_LOOP_SESSION set-but-empty is a deliberate opt-out: it targets the repo-global legacy
+    state even inside a Claude session (how a leftover pre-per-session mandate gets cleared).
+    """
+    if "GAME_LOOP_SESSION" in os.environ:
+        return os.environ["GAME_LOOP_SESSION"]
+    return os.environ.get("CLAUDE_CODE_SESSION_ID")
+
+
 def refuse_home(msg):
     """A home that cannot be trusted is refused, never guessed. Stderr + exit 2, before any work."""
     sys.stderr.write(msg + "\n")
     raise SystemExit(2)
 
 
+def session_home(code_root):
+    """The main checkout's home, when this code is a worktree's copy and the session is the main's.
+
+    A WORKTREE CARRIES ITS OWN .game_loop/, provisioned there for the Crawler that runs in it, and
+    that Crawler's record belongs in it. An orchestrator whose hooks run from the MAIN checkout can
+    still `cd` into that worktree to land a merge, and `./.game_loop/bin/game_loop` is then the
+    worktree's copy, which took its own directory as home. Reported 2026-10-29, five merges in a day:
+    `attribute --merge` printed "✓ ATTRIBUTED" into the worktree's state, the commit gate read the
+    main checkout's, and all 46 files were listed as never edited. The same path puts any verb's
+    record where the hooks never look: a `checkpoint` the stop gate cannot see, a `claim` that is not
+    there after compaction.
+
+    THE EVIDENCE IS THE WRITE GUARD'S INVOCATION MARK, because only a hook leaves it, and a hook runs
+    from the home that owns the session. "A session directory exists" would not do: a verb run by the
+    wrong path creates one, so a directory is what this defect leaves behind, and a Crawler that once
+    ran the main checkout's binary would be pulled out of its own tree for good.
+
+    ONE RECORD MOVES, THE ONE THAT WAS ALWAYS THE MAIN'S. Session state stays per-tree as limits_file
+    sets out; nothing here shares a Crawler's state with anyone.
+
+    PERFORMANCE: every verb passes through here, and outside a linked worktree this is one isfile.
+    It reads the .git file rather than asking git, because this runs before anything else does.
+
+    WHAT THIS MISSES: a session the write guard has never fired for has no mark, so it stays with
+    the copy it ran. A verb issued before that session's first guarded call lands locally, as before.
+    """
+    git_file = os.path.join(os.path.dirname(code_root), ".git")
+    sid = sanitize_session(env_session())
+    if not sid or not os.path.isfile(git_file):
+        return None
+    try:
+        with open(git_file) as f:
+            gitdir = f.read().strip()
+    except OSError:
+        return None
+    if not gitdir.startswith("gitdir:"):
+        return None
+    gitdir = os.path.normpath(os.path.join(os.path.dirname(git_file), gitdir[7:].strip()))
+    worktrees = os.path.dirname(gitdir)
+    common = os.path.dirname(worktrees)
+    # A submodule's .git is a file too, and it points under modules/, which is a different project.
+    if os.path.basename(worktrees) != "worktrees" or os.path.basename(common) != ".git":
+        return None
+    main = os.path.join(os.path.dirname(common), ".game_loop")
+    mark = os.path.join("sessions", sid, "write-guard-probe")
+    if (os.path.isfile(os.path.join(main, "config.json"))
+            and os.path.exists(os.path.join(main, mark))
+            and not os.path.exists(os.path.join(code_root, mark))):
+        sys.stderr.write("game_loop: this session's hooks run from %s, so its record is kept there "
+                         "and not in this worktree's copy.\n" % main)
+        return main
+    return None
+
+
 def resolve_home(code_root, prog):
     """The .game_loop/ that owns identity and state, given the one the CODE lives in.
 
-    Unset  → the code's own directory (today's behavior, unchanged).
+    Unset  → the code's own directory, or the main checkout's when this is a worktree's copy run by
+             a session the main checkout's hooks own (session_home).
     Set    → it must exist and carry config.json, or this REFUSES. A silent fallback to __file__ is
              the whole trap: it would point every check at the pinned copy and report success.
     Set to the empty string → also refused. That is deliberately NOT the GAME_LOOP_SESSION
@@ -152,7 +225,7 @@ def resolve_home(code_root, prog):
                 "the project's home:\n"
                 f"    {HOME_ENV}=<project>/.game_loop {code_root}/bin/{prog} ...\n"
                 "  → `game_loop self` prints the hook wiring that sets it.")
-        return code_root
+        return session_home(code_root) or code_root
     home = os.path.abspath(os.path.expanduser(raw.strip())) if raw.strip() else ""
     if home and os.path.isfile(os.path.join(home, "config.json")):
         return home
@@ -224,24 +297,6 @@ VERSION_F = os.path.join(ROOT, "VERSION")     # the game_loop commit sha install
 UPDATE_CACHE_F = os.path.join(ROOT, ".update_cache.json")  # cached latest-sha lookup (gitignored)
 
 SESSION = None  # sanitized id of the session this invocation belongs to, or None
-
-
-def sanitize_session(sid):
-    """A session id becomes a directory name — keep it to safe characters, bounded length."""
-    if not isinstance(sid, str) or not sid.strip():
-        return None
-    return re.sub(r"[^A-Za-z0-9._-]", "-", sid.strip())[:64]
-
-
-def env_session():
-    """The session id visible to a CLI invocation (agent-run Bash exports it).
-
-    GAME_LOOP_SESSION set-but-empty is a deliberate opt-out: it targets the repo-global legacy
-    state even inside a Claude session (how a leftover pre-per-session mandate gets cleared).
-    """
-    if "GAME_LOOP_SESSION" in os.environ:
-        return os.environ["GAME_LOOP_SESSION"]
-    return os.environ.get("CLAUDE_CODE_SESSION_ID")
 
 
 def set_session(sid):

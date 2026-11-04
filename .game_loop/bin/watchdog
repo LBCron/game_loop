@@ -233,6 +233,14 @@ RESUME_BUFFER_SEC = int(os.environ.get("WATCHDOG_RESUME_BUFFER_SEC") or 30)
 # hook firing. Below this age an unseen successor is assumed to be on its way; above it, it never
 # came, and the ring is the right answer.
 SUCCESSOR_BOOT_SEC = int(os.environ.get("WATCHDOG_SUCCESSOR_BOOT_SEC") or 120)
+# The longest one watchdog holds a declared wait: the hook's own timeout in settings.hooks.json, past
+# which the harness would end this process anyway. It is here for the owner the chain below cannot
+# see, so that no case polls forever. A bound of 0 keeps the one-look behaviour.
+_HOLD_MAX = os.environ.get("WATCHDOG_HOLD_MAX_SEC")
+HOLD_MAX_SEC = int(_HOLD_MAX) if _HOLD_MAX not in (None, "") else 604800
+# While a hold keeps agreeing, one line per this many seconds: a tick every idle_sec for a two-hour
+# fan-out is 240 identical lines in a log people read.
+HOLD_LOG_EVERY_SEC = 1800
 
 
 def handoff_path():
@@ -768,7 +776,7 @@ def session_env():
     return {"GAME_LOOP_SESSION": SESSION or "", "GAME_LOOP_SESSION_DIR": sdir}
 
 
-def waiting_verdict(tpath=None):
+def waiting_verdict(tpath=None, log_if_waiting=True):
     """Is this run WAITING on work it dispatched, rather than asleep? (bool, reason)
 
     Idleness is measured from transcript growth, and a subagent's output does not grow the parent's
@@ -794,7 +802,9 @@ def waiting_verdict(tpath=None):
       watchdog on exactly the wedged run it was built to catch, and fails silent. A false "not
       waiting" costs one unnecessary ring.
     * EVERY VERDICT LOGGED, so "how often did this silence the watchdog, and for how long" is a fact
-      rather than a hunch the next time somebody argues the cap is too aggressive.
+      rather than a hunch the next time somebody argues the cap is too aggressive. A hold's repeat
+      "still waiting" is the one exception (log_if_waiting=False), and it is thinned rather than
+      dropped: anything but a clean "waiting" always logs, so every flip is on the record.
 
     Absent config leaves the watchdog behaving exactly as it did before.
     """
@@ -831,7 +841,9 @@ def waiting_verdict(tpath=None):
         answered = r.returncode in (0, 1)
         reason = (r.stdout or "").strip().splitlines()
         reason = reason[0][:160] if reason else ""
-        detail = reason if waiting else (r.stderr or "").strip()[:160]
+        # A NOT-WAITING REASON MAY ARRIVE ON EITHER CHANNEL. The ring now quotes this, so a probe
+        # that says why on stdout must not read as a probe that gave no reason.
+        detail = reason if waiting else ((r.stderr or "").strip()[:160] or reason)
         if not answered:
             detail = (detail or f"exit {r.returncode} with nothing on stderr")[:160]
             # 127 IS BASH'S "command not found", and it arrives as a COMPLETED run rather than an
@@ -860,12 +872,125 @@ def waiting_verdict(tpath=None):
     #
     # Empty string when the probe ANSWERED, so "why did it fail" is never a question about a run
     # that did not fail. The three values are timeout · unrunnable · unexpected_exit.
-    logline({"kind": "watchdog_waiting", "waiting": waiting, "answered": answered,
-             "detail": detail, "why": why})
+    if not (waiting and answered and not log_if_waiting):
+        logline({"kind": "watchdog_waiting", "waiting": waiting, "answered": answered,
+                 "detail": detail, "why": why})
     return waiting, detail
 
 
-def ring(state, rings):
+def owner_chain():
+    """The live ancestors of this process: the session that would hear a ring, and what launched it.
+
+    A LIST, BECAUSE THE PARENT ALONE CANNOT ANSWER. A hook usually runs under a shell, and a shell
+    blocked on this child outlives the harness that started it, so "my parent is alive" stays true
+    after the session is gone. Never raises: an empty chain means nothing could be looked at.
+    """
+    chain, pid = [], os.getppid()
+    while pid > 1 and len(chain) < 8:
+        chain.append(pid)
+        try:
+            r = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True,
+                               text=True, timeout=5)
+            pid = int(r.stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            break
+    return chain
+
+
+def owner_gone(chain):
+    """Has any process in the chain exited? An EPERM answer means alive and somebody else's."""
+    for pid in chain:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def hold_while_waiting(tpath, why, base):
+    """Stay alive through a declared wait, and return the probe's reason the moment it ends.
+
+    ONE LOOK WAS NOT A WAIT. This used to exit at the first "waiting" verdict, about idle_sec after
+    the turn ended, and nothing re-armed until the next turn-end, which an idle session never reaches.
+    So the watchdog had already gone when the thing it was told to wait for ended. Reported by an
+    orchestrator on 2026-11-04 and measured: with the probe flipped to "not waiting" afterwards the
+    process had exited 0 and nothing rang. A Crawler whose close message was lost, a waker that died,
+    a Crawler that blocked an hour in: each of those left the run asleep until a human looked, under
+    a tool whose whole job is that case, and it looked exactly like a healthy wait.
+
+    Ticking here costs no tokens, since a wake is what costs and this is a background hook. It costs
+    one probe per idle_sec, which is why llms.txt tells a probe its cost is part of its contract.
+
+    EVERY REASON TO STOP WATCHING IS RE-READ ON EACH TICK, against the world as it is now. A session
+    that went back to work has a transcript that grew, and its own next turn-end arms a new watchdog.
+
+    OWNER GONE IS THE CASE THAT DID NOT EXIST BEFORE. A process that lives for hours outlives the
+    session that started it unless it checks, and a machine with hundreds of closed sessions would
+    keep running each one's probe for days. A hold ended by a transient ancestor exiting is the wrong
+    direction to fail in, so the end of every hold is logged with its cause and its length.
+
+    WHAT THIS MISSES: an owner it cannot see (an empty chain) is bounded only by HOLD_MAX_SEC. A probe
+    that answers "waiting" for ever is believed for ever, which is the probe's contract rather than
+    something a watchdog can check. And a hold does not outlive the host: a closed laptop rings
+    nobody, and when it opens the hold simply carries on.
+    """
+    started = last_log = time.time()
+    chain = owner_chain()
+    probes = 0
+
+    def stand_down(reason):
+        logline({"kind": "watchdog_hold_end", "ended": reason, "held_sec": int(time.time() - started),
+                 "probes": probes})
+        quiet(reason)
+
+    while True:
+        if time.time() - started >= HOLD_MAX_SEC:
+            stand_down(f"a declared wait verifies ({why or 'probe says still waiting'}) — not "
+                       "ringing a run that has correctly run out of work; the hold reached its "
+                       "bound, so nothing is watching this wait from here")
+        slept = 0
+        while slept < IDLE_SEC:
+            nap = min(CHUNK_SEC, IDLE_SEC - slept)
+            time.sleep(nap)
+            slept += nap
+            if superseded():
+                stand_down("superseded by a newer watchdog during a hold")
+        state = load_state()
+        m = state.get("mandate") or {}
+        if not m.get("active"):
+            stand_down("mandate released during a hold")
+        if m.get("parked"):
+            stand_down("the human called a break during a hold")
+        if state.get("t3_armed"):
+            stand_down("T3 armed during a hold — the human is holding the ball")
+        if (reason := handed_off_quiet(state)):
+            stand_down(reason)
+        now_size = transcript_size(tpath)
+        if base is not None and now_size is not None and now_size > base:
+            stand_down("the session went back to work during a hold")
+        if owner_gone(chain):
+            stand_down("the session that started this hold is gone")
+        now = time.time()
+        due = now - last_log >= HOLD_LOG_EVERY_SEC
+        waiting, detail = waiting_verdict(tpath, log_if_waiting=due)
+        probes += 1
+        if due:
+            last_log = now
+        if waiting:
+            why = detail or why
+            continue
+        logline({"kind": "watchdog_hold_end", "ended": "the probe stopped saying waiting",
+                 "held_sec": int(now - started), "probes": probes, "detail": detail})
+        # THE WAIT MAY HAVE OUTLASTED THE WINDOW. The limit park ran before this hold, possibly hours
+        # ago, and a ring is an API call into whatever wall has arrived since.
+        refresh_limits_if_due()
+        park_until_limit_resets(load_state())
+        return detail
+
+
+def ring(state, rings, probe_note=""):
     ph = state.get("phase") or {}
     m = state.get("mandate") or {}
     logline({"kind": "watchdog_ring", "mandate": m.get("text"),
@@ -918,7 +1043,8 @@ def ring(state, rings):
         + (f"  game_loop says: ...and that phase line is {_phase_note}\n" if _phase_note else "")
         + (f"{_head_note}\n" if _head_note else "")
         + f"  game_loop says: nobody is waiting on you (no T3 armed)\n"
-        f"  harness says  : the transcript has not grown in {IDLE_SEC}s — you are parked\n\n"
+        + (f"  waiting probe : {probe_note}\n" if probe_note else "")
+        + f"  harness says  : the transcript has not grown in {IDLE_SEC}s — you are parked\n\n"
         "Both cannot be true. You are under an autonomy mandate with work outstanding and you are\n"
         "doing nothing. The Stop gate can stop you SAYING the wrong thing, but it cannot press go for\n"
         "you. That is what this is.\n\n"
@@ -1038,6 +1164,18 @@ def phase_written_note(ph, when=None):
             f'any "today" in it means THAT day')
 
 
+def probe_note(why, held=False):
+    """The line a ring or a page carries about the probe, or "" when no probe is configured.
+
+    A RING THAT DROPS THE REASON SENDS THE RUN TO THE WRONG WORK. A probe said "a Crawler is BLOCKED"
+    and the wake said only GO. That Crawler needs a message, and GO says to run the next thing.
+    """
+    if not str(_WD.get("waiting_probe") or "").strip():
+        return ""
+    text = why or "not waiting, and it gave no reason"
+    return ("the wait this watchdog was holding has ended — " + text) if held else text
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -1153,8 +1291,13 @@ def main():
         if _w:
             logline({"kind": "watchdog_wait_held", "rings": rings, "detail": _why,
                      "note": "cap reached but a declared wait still verifies — not paging"})
-            quiet(f"waiting on dispatched work ({_why or 'probe says still live'}) — "
-                  "cap not spent on a healthy run")
+            # THE SAME ONE-LOOK GAP, AT THE MOST EXPENSIVE PLACE TO HAVE IT. A run already at the cap
+            # that went into a wait was never paged when the wait ended. Nothing above has claimed
+            # the pidfile on this path, and a hold ends on being superseded, so claim it first.
+            if not claim_pidfile():
+                quiet("cannot write pidfile")
+            _why = hold_while_waiting(tpath, _why, transcript_size(tpath))
+            _w = False
         logline({"kind": "watchdog_exhausted", "rings": rings,
                  "note": "stood down after RING_CAP consecutive unproductive rings"})
         # This is precisely the "the run is stuck and needs a body at the desk" moment — page it.
@@ -1170,7 +1313,8 @@ def main():
                             f"🧯 the watchdog stood down after {rings} unproductive rings — the run "
                             f"is stuck and needs you at the machine.\n"
                             f"mandate: {m0.get('text')}\nphase: {ph0.get('milestone')} · "
-                            f"{ph0.get('doing')}")
+                            f"{ph0.get('doing')}"
+                            + (f"\nwaiting probe: {probe_note(_why)}" if probe_note(_why) else ""))
         quiet("ring cap reached")
 
     # newest watchdog wins: supersede any previously armed one.
@@ -1233,10 +1377,14 @@ def main():
     # declaration, config-authored and never settable by the agent, and it is conservative toward
     # NOT waiting -- every failure mode returns "not waiting" and the ring happens. So the only way
     # to reach this quiet is for the project's own check to positively assert there is nothing to do.
+    #
+    # AND IT STOPS THE RING ONLY FOR AS LONG AS IT VERIFIES: see hold_while_waiting.
     _w, _why = waiting_verdict(tpath)
+    _held = _w
     if _w:
-        quiet(f"a declared wait verifies ({_why or 'probe says still waiting'}) — not ringing a run "
-              "that has correctly run out of work")
+        _why = hold_while_waiting(tpath, _why, before)
+        state = load_state()
+        state["_tpath"] = tpath
 
     after = transcript_size(tpath)
     if before is not None and after is not None and after > before:
@@ -1254,7 +1402,7 @@ def main():
                  "note": "could not size the transcript; not ringing on an unmeasured guess"})
         quiet("cannot measure transcript growth")
 
-    ring(state, state.get("watchdog_rings", 0))
+    ring(state, state.get("watchdog_rings", 0), probe_note(_why, held=_held))
 
 
 if __name__ == "__main__":

@@ -345,6 +345,14 @@ MUTATE_VERBS = {
     # (`mcp__marionette__`) has no tool whose verb slot is `propose`, so no existing prefix grant
     # quietly widens.
     "propose",
+    # A live session to a running target (reported from a device walkthrough, 2026-10-29).
+    # `mcp__marionette__connect` opens a VM-service connection and every redeploy needs a new one.
+    # Left UNCLASSIFIED it failed closed where config could not repair it, the same way as `propose`
+    # above: mcp_standing_writes is consulted only on the mutating branch, so the server's prefix
+    # grant never reached it and each deploy spent one hatch use. NOT read-only, though it writes
+    # nothing to the app or repo: it changes what later calls act on, and a verb wrongly called
+    # read-only is a bypass, where one wrongly called mutating costs a grant.
+    "connect", "disconnect",
     # Device / app lifecycle and on-device effectors: each one ACTS on a running target, which is
     # exactly what `start`/`stop`/`restart` above already cover.
     "background", "foreground", "hot", "setup", "build", "open", "key", "pointer", "record",

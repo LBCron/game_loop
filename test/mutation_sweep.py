@@ -659,6 +659,18 @@ MUTANTS = [
      "CLONE: SWEEP_ONLY reported 4 killed; neutering by hand and diffing the FAIL rows gave exactly "
      "those 2. A floor of 2 is thin by this file's own measure (under 3), and it is thin because "
      "the hatch has two observable effects, not because a third assertion was skipped.", 2),
+    ("hold_while_waiting -> one look and gone, the world before this hold existed",
+     ".game_loop/bin/watchdog::hold_while_waiting", "    quiet(\"a declared wait verifies\")\n",
+     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
+    ("owner_gone -> a hold never notices its session has gone",
+     ".game_loop/bin/watchdog::owner_gone", "    return False\n",
+     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
+    ("probe_note -> a ring never says what the probe said",
+     ".game_loop/bin/watchdog::probe_note", "    return \"\"\n",
+     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
+    ("session_home -> a worktree's copy always keeps its own record",
+     ".game_loop/bin/_gl_impl.py::session_home", "    return None\n",
+     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
     ("unbound_mandate_notice -> the notice never has anything to say",
      ".game_loop/bin/_gl_impl.py::unbound_mandate_notice", '    return ""\n',
      ['FIRES on the case it exists for', 'never REFUSES', 'says so in BOTH directions'],
@@ -2258,6 +2270,10 @@ NOT_SWEPT = {
                               "not swept — the same call as read_or_empty above.",
     "test/run.py::_ssctx": "a suite fixture helper",
     "test/run.py::_ask": "a suite fixture helper",
+    "test/run.py::_hwlog": "a suite helper polling the hold sandbox's log: neutered to False it "
+                           "reddens the assertions that wait on it, which is the safe direction",
+    "test/run.py::_hwend": "a suite helper bounding a held watchdog's exit: neutered to None the "
+                           "exit-code assertions that read it go red, which is the safe direction",
     "test/run.py::_cron_log": "a suite helper reading the #135 sandbox log: neutered to an empty "
                               "list it reddens the two count assertions that use it, which is the "
                               "safe direction, so there is no silence for a sweep to find",
