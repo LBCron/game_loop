@@ -661,16 +661,28 @@ MUTANTS = [
      "the hatch has two observable effects, not because a third assertion was skipped.", 2),
     ("hold_while_waiting -> one look and gone, the world before this hold existed",
      ".game_loop/bin/watchdog::hold_while_waiting", "    quiet(\"a declared wait verifies\")\n",
-     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
+     ['keeps a live watchdog past the first look', 'the wait ending RINGS', 'QUOTES THE PROBE',
+      'is COUNTED as a ring', 'during a hold ends it', 'a session that goes back to work', 'a hold has a bound',
+      'a hold whose session has gone', 'a verifying wait is HELD', "the cap's stand-down DOES happen"],
+     "NEUTERED TO ONE quiet() IS THE PRE-FIX WORLD: a first \"waiting\" exits and the end of the wait "
+     "rings nobody. MEASURED 2026-11-04 at 427ed2f, in a CLONE, by neutering by hand and listing the suite's FAIL rows: 17 rows. Three of them are the reachability scan noticing owner_chain lost "
+     "its only caller, which is real and not about this behaviour, so the floor is the 14.", 14),
     ("owner_gone -> a hold never notices its session has gone",
      ".game_loop/bin/watchdog::owner_gone", "    return False\n",
-     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
+     ['a hold whose session has gone'],
+     "THIN AT 1, AND THE THINNESS IS THE SHAPE: this has one observable effect, a hold ending when its "
+     "owner has. MEASURED 2026-11-04 at 427ed2f, in a CLONE, by neutering by hand and listing the suite's FAIL rows.", 1),
     ("probe_note -> a ring never says what the probe said",
      ".game_loop/bin/watchdog::probe_note", "    return \"\"\n",
-     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
+     ['QUOTES THE PROBE', 'first-look NOT WAITING', 'a probe with nothing to say'],
+     "NEUTERED, A RING SAYS GO WHATEVER THE PROBE FOUND, which is what a blocked Crawler got. The "
+     "no-probe assertion passes by construction here. MEASURED 2026-11-04 at 427ed2f, in a CLONE, by neutering by hand and listing the suite's FAIL rows.", 3),
     ("session_home -> a worktree's copy always keeps its own record",
      ".game_loop/bin/_gl_impl.py::session_home", "    return None\n",
-     [], "FLOOR OWED, RECORDED 0, paid in the next commit from a clone.", 0),
+     ['lands in the MAIN checkout', 'it SAYS where the record went', "merge's files drop out", 'holds for every verb'],
+     "NEUTERED TO None IS THE REPORTED WORLD: \"ATTRIBUTED\" written where the commit gate never reads. "
+     "The Crawler controls pass by construction under this neuter and exist for the opposite one, a "
+     "copy that always defers. MEASURED 2026-11-04 at 427ed2f, in a CLONE, by neutering by hand and listing the suite's FAIL rows.", 4),
     ("unbound_mandate_notice -> the notice never has anything to say",
      ".game_loop/bin/_gl_impl.py::unbound_mandate_notice", '    return ""\n',
      ['FIRES on the case it exists for', 'never REFUSES', 'says so in BOTH directions'],
