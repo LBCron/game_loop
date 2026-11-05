@@ -275,7 +275,8 @@ reduces the damage, it does not remove the class.
   It takes refs, never filenames — game_loop recomputes the files from the ref, and a ref that does
   not resolve is refused. Run from a worktree with its own .game_loop/, that copy keeps your record
   where your hooks read it, in the main checkout, and says so on stderr. A Crawler whose hooks run in
-  that worktree keeps its record there.
+  that worktree keeps its record there. Only the record (session state and the log) moves: a
+  question about the tree itself, such as `worktree --porcelain`, still answers for the worktree.
 
 None of these have an env-var override, by design. The only escape hatch is a human.
 

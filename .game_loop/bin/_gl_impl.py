@@ -145,7 +145,8 @@ def refuse_home(msg):
 
 
 def session_home(code_root):
-    """The main checkout's home, when this code is a worktree's copy and the session is the main's.
+    """Where this session's RECORD is kept, when this code is a worktree's copy and the session is the
+    main checkout's: that checkout's .game_loop/. Else None.
 
     A WORKTREE CARRIES ITS OWN .game_loop/, provisioned there for the Crawler that runs in it, and
     that Crawler's record belongs in it. An orchestrator whose hooks run from the MAIN checkout can
@@ -163,6 +164,16 @@ def session_home(code_root):
 
     ONE RECORD MOVES, THE ONE THAT WAS ALWAYS THE MAIN'S. Session state stays per-tree as limits_file
     sets out; nothing here shares a Crawler's state with anyone.
+
+    ONLY THE RECORD MOVES, NEVER THE TREE (#138, #139). This used to return a new HOME, so ROOT and
+    REPO_ROOT followed the session too, and every question about the tree answered for the wrong one.
+    showrunner's spawn runs a new worktree's `worktree --porcelain` with the orchestrator's session id
+    in its environment; the copy answered for the main checkout, the main checkout is not a linked
+    worktree, and every spawn was refused for a day. The same move made `pin_file_drift` read a
+    worktree's own code as a pinned copy, because CODE_ROOT != ROOT is how a pin is recognised. So
+    the caller binds the answer to RECORD_ROOT, which only the record follows: sessions/ and log.jsonl
+    (gates read a session's log lines back by sid), plus the path space of anything written into
+    that record (RECORD_REPO). Rules, config and identity stay the tree's own.
 
     PERFORMANCE: every verb passes through here, and outside a linked worktree this is one isfile.
     It reads the .git file rather than asking git, because this runs before anything else does.
@@ -193,7 +204,8 @@ def session_home(code_root):
             and os.path.exists(os.path.join(main, mark))
             and not os.path.exists(os.path.join(code_root, mark))):
         sys.stderr.write("game_loop: this session's hooks run from %s, so its record is kept there "
-                         "and not in this worktree's copy.\n" % main)
+                         "and not in this worktree's copy. Questions about this tree still answer "
+                         "for this tree.\n" % main)
         return main
     return None
 
@@ -201,8 +213,9 @@ def session_home(code_root):
 def resolve_home(code_root, prog):
     """The .game_loop/ that owns identity and state, given the one the CODE lives in.
 
-    Unset  → the code's own directory, or the main checkout's when this is a worktree's copy run by
-             a session the main checkout's hooks own (session_home).
+    Unset  → the code's own directory. (A session the main checkout's hooks own keeps its RECORD
+             there even when it runs a worktree's copy, but that is RECORD_ROOT, not the home: see
+             session_home for why the two must not be one value.)
     Set    → it must exist and carry config.json, or this REFUSES. A silent fallback to __file__ is
              the whole trap: it would point every check at the pinned copy and report success.
     Set to the empty string → also refused. That is deliberately NOT the GAME_LOOP_SESSION
@@ -225,8 +238,8 @@ def resolve_home(code_root, prog):
                 "the project's home:\n"
                 f"    {HOME_ENV}=<project>/.game_loop {code_root}/bin/{prog} ...\n"
                 "  → `game_loop self` prints the hook wiring that sets it.")
-        return session_home(code_root) or code_root
-    home = os.path.abspath(os.path.expanduser(raw.strip())) if raw.strip() else ""
+        return code_root
+    home =os.path.abspath(os.path.expanduser(raw.strip())) if raw.strip() else ""
     if home and os.path.isfile(os.path.join(home, "config.json")):
         return home
     refuse_home(
@@ -240,12 +253,16 @@ def resolve_home(code_root, prog):
         "entirely.")
 
 
-ROOT = resolve_home(CODE_ROOT, "game_loop")   # .game_loop/ — identity and state
-REPO_ROOT = os.path.dirname(ROOT)
-SESSIONS_DIR = os.path.join(ROOT, "sessions")
-LEGACY_STATE_F = os.path.join(ROOT, "state.json")   # no-session fallback (human terminal, old harness)
+ROOT = resolve_home(CODE_ROOT, "game_loop")   # .game_loop/ — this TREE's identity, rules and config
+REPO_ROOT = os.path.dirname(ROOT)             # the tree every question about "this tree" answers for
+# THE SESSION'S RECORD, which is not always the tree's: session_home says when and why. Pinned code
+# (GAME_LOOP_HOME set) is the main checkout's own wiring and is never redirected.
+RECORD_ROOT = (None if HOME_ENV in os.environ else session_home(ROOT)) or ROOT
+RECORD_REPO = os.path.dirname(RECORD_ROOT)    # the path space of repo-relative paths in that record
+SESSIONS_DIR = os.path.join(RECORD_ROOT, "sessions")
+LEGACY_STATE_F = os.path.join(RECORD_ROOT, "state.json")   # no-session fallback (human terminal)
 STATE_F = LEGACY_STATE_F                            # re-pointed by set_session()
-LOG_F = os.path.join(ROOT, "log.jsonl")
+LOG_F = os.path.join(RECORD_ROOT, "log.jsonl")
 CONFIG_F = os.path.join(ROOT, "config.json")
 INV_F = os.path.join(ROOT, "INVARIANTS.md")
 # THE FALLBACK, NOT THE ANSWER — read limits_file() below, which is account-scoped. This one is
@@ -1070,7 +1087,7 @@ def _run_trigger(s, t, event, payload, default_timeout=20.0, max_timeout=None):
     # repo-global paths -- never a session whose name is the empty string.
     env = dict(os.environ, GAME_LOOP_EVENT=event, GAME_LOOP_ROOT=ROOT, GAME_LOOP_REPO=REPO_ROOT,
                GAME_LOOP_SESSION=SESSION or "",
-               GAME_LOOP_SESSION_DIR=(os.path.join(ROOT, "sessions", SESSION) if SESSION
+               GAME_LOOP_SESSION_DIR=(os.path.join(SESSIONS_DIR, SESSION) if SESSION
                                       else ""))
     ran, code = True, None
     _t0 = time.time()
@@ -5352,8 +5369,12 @@ def attribution_tree():
     Same answer the commit gate resolves for the tree a commit LANDS in (#28), so the two sets
     describe one world. A cwd somewhere else entirely falls back to the project rather than
     attributing a foreign checkout's refs.
+
+    RECORD_REPO, not REPO_ROOT: the attribution is written into the session's record and read back
+    by the commit gate of the checkout that owns it, so "the project" is that checkout. They differ
+    only when a main-checkout session runs a worktree's copy (session_home).
     """
-    root = os.path.realpath(REPO_ROOT)
+    root = os.path.realpath(RECORD_REPO)
     try:
         cwd = os.getcwd()
     except OSError:
@@ -5400,7 +5421,8 @@ def merge_files(tree, ref):
     diff = _git_out(tree, "diff", "--name-only", base + ".." + sha)
     if diff is None:
         return None, "git could not diff %s..'%s' in %s" % (base[:8], ref, tree)
-    prefix = os.path.relpath(tree, os.path.realpath(REPO_ROOT))
+    # The record's path space (RECORD_REPO), for the reason attribution_tree gives.
+    prefix = os.path.relpath(tree, os.path.realpath(RECORD_REPO))
     paths = []
     for line in diff.splitlines():
         p = line.strip()
@@ -6862,7 +6884,26 @@ _ASK_MARKERS = [
     # "you'd rather" is not "would you rather" — a contraction and a different word order.
     "you would rather", "unless you", "if you would prefer", "if you prefer",
     "say the word", "up to you", "your preference", "or i can ", "or i could ",
+    # #137: an owner turn offered two options and ended "nothing gets written until you've chosen".
+    # Kept to the one bare phrase the report named; the deferral itself is _DEFER_TO_HUMAN_PAT.
+    "if you want",
 ]
+
+# DEFERRING UNTIL THE HUMAN PICKS IS AN ASK WITH NO QUESTION IN IT (#137). The reported ending was
+# "Either way, nothing gets written until you've chosen": no question mark, and no marker covered
+# deferring until the human chooses. A pattern rather than the reporter's eight strings, for the
+# reason _CONTRACTIONS gives: the next tense or connective nobody listed is already covered.
+_DEFER_TO_HUMAN_PAT = re.compile(
+    # "when" and "after" are left out on purpose: "it refuses when you choose X" is how a report
+    # explains a rule, while "until"/"once"/"whichever" put the next step in the human's hands.
+    r"\b(?:until|once|whichever|whatever) you (?:have )?"
+    r"(?:choose|chose|chosen|decide|decided|pick|picked|prefer)\b")
+
+# A MENU IS THE ASK EVEN WITH EVERY SENTENCE A STATEMENT (#137): "**Recommended:** X" on one line and
+# "**Or** Y" on another hands the human a choice. Both lines are required, at line start (after a list
+# bullet), so neither a lone "recommended:" note nor a sentence that opens with "Or" fires it.
+_MENU_RECOMMENDED = re.compile(r"^(?:[-*•]|\d+[.)])?\s*\*{0,2}recommended\*{0,2}\s*:", re.M)
+_MENU_ALTERNATIVE = re.compile(r"^(?:[-*•]|\d+[.)])?\s*\*{0,2}or\b", re.M)
 
 # CONTRACTIONS ARE WHY THE LIST MISSED IT, and expanding them is worth more than the two strings
 # it would have taken to patch that one sentence. Every marker here is written expanded, so
@@ -6873,6 +6914,9 @@ _CONTRACTIONS = (
     ("i'll", "i will"), ("we'll", "we will"), ("you'll", "you will"),
     ("i'd", "i would"), ("you'd", "you would"), ("we'd", "we would"),
     ("let's", "let us"), ("i'm", "i am"), ("you're", "you are"),
+    # #137's sentence said "until you've chosen", and with no expansion for 've the deferral
+    # pattern below could not see it.
+    ("i've", "i have"), ("you've", "you have"), ("we've", "we have"),
 )
 
 # A WORD INSERTED BETWEEN VERB AND PARTICLE also slipped past: the list had "i'll pick up" and the
@@ -6916,9 +6960,12 @@ def _asked_the_user(text):
     if not text:
         return False
     t = _normalise(text)
-    if any(_normalise(mk) in t for mk in _ASK_MARKERS):
+    if any(_normalise(mk) in t for mk in _ASK_MARKERS) or _DEFER_TO_HUMAN_PAT.search(t):
         return True
-    tail = [ln.strip() for ln in (text or "").lower().strip().splitlines() if ln.strip()][-3:]
+    lowered = text.lower()
+    if _MENU_RECOMMENDED.search(lowered) and _MENU_ALTERNATIVE.search(lowered):
+        return True
+    tail =[ln.strip() for ln in (text or "").lower().strip().splitlines() if ln.strip()][-3:]
     return any(ln.endswith("?") for ln in tail)
 
 

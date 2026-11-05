@@ -8292,6 +8292,34 @@ def main():
         check("with no session id there is nothing to move, so the copy stays its own home",
               "its record is kept there" not in _r.stderr)
 
+        # ONLY THE RECORD MOVES (#138, #139). showrunner's spawn asks a new worktree's copy
+        # `worktree --porcelain` with the orchestrator's session id still in the environment. When
+        # the redirect moved the whole home, the copy answered for the main checkout, found it was
+        # not a linked worktree, and every spawn was refused. The sessionless run is the control:
+        # the session id must not change what this tree IS.
+        _bare = _shrun(_shwt, _shwt, "worktree", "--porcelain", sid=None)
+        _orch = _shrun(_shwt, _shwt, "worktree", "--porcelain")
+        _bj, _oj = json_text(_bare.stdout), json_text(_orch.stdout)
+        _bj, _oj = (_bj if isinstance(_bj, dict) else None), (_oj if isinstance(_oj, dict) else None)
+        check("control: with no session, the copy's `worktree --porcelain` describes the worktree "
+              "and names the main checkout",
+              _bj and os.path.realpath(_bj.get("tree") or "") == _shwt
+              and os.path.realpath(_bj.get("main_checkout") or "") == os.path.realpath(sh)
+              and _bj.get("status") != "not-a-worktree")
+        check("a main-checkout session asking the copy gets the SAME answer about the tree — same "
+              "tree, same main checkout, same verdict, same exit — while its record still moves",
+              _oj and _bj and _oj.get("tree") == _bj.get("tree")
+              and _oj.get("main_checkout") == _bj.get("main_checkout")
+              and _oj.get("status") == _bj.get("status")
+              and _orch.returncode == _bare.returncode
+              and "its record is kept there" in _orch.stderr)
+        check("...and `status` from that copy shows this tree's WORKTREE block beside the main "
+              "checkout's mandate, the two answers the old redirect could not give at once",
+              # The block's own heading, not the bare word: "LINKED WORKTREE" appears in other
+              # status lines, and matching it let this pass against the old redirect.
+              "WORKTREE — a second tree of one project"
+              in (_st := _shrun(_shwt, _shwt, "status").stdout) and "land the leaf" in _st)
+
         # A submodule's .git is also a file, and pointing at modules/ makes it a different project.
         _sub = _tmpdir("gl-submodule-")
         shutil.copytree(os.path.join(sh, ".game_loop"), os.path.join(_sub, "m", "dep", ".game_loop"),
@@ -9226,6 +9254,27 @@ def main():
     check("...and a sentence that BOTH hands back and claims to be working trips both checks — "
           "they are different failures and the report should say both",
           _ask("Say the word and I will take it.") and _cont("Say the word and I will take it."))
+
+    # #137, verbatim: an owner turn handed the human a decision it owned, with no question mark and
+    # no listed marker. The human: "There's no reason I needed to make that decision."
+    _MENU = ("**What you can do instead:**\n"
+             "- **Recommended:** add a leaf for the fleet build and spawn it\n"
+             "- **Or** map a seat that matches where this session sits\n\n"
+             "Either way, nothing gets written until you've chosen.")
+    check("#137's ending is caught as a handback, and it has no question mark in it",
+          _ask(_MENU) and "?" not in _MENU)
+    check("...the deferral alone is caught, in its other tenses and connectives",
+          all(_ask(t) for t in ("Nothing gets written until you've chosen.",
+                                "I will hold this until you decide.",
+                                "Once you pick one, I will build it.",
+                                "Whichever you prefer is fine.")))
+    check("...and the menu alone is caught with every sentence a statement",
+          _ask("- **Recommended:** ship the fix now\n- **Or** wait for the next report\n"))
+    check("...while an explanation of a rule, a lone 'Recommended:' note, and prose opening with "
+          "'Or' stay silent, so this is still a discrimination",
+          not _ask("The guard refuses when you choose a path outside the repo.")
+          and not _ask("Recommended: run the suite before every release.")
+          and not _ask("Or, put another way, the gate held.\nReleased as #193."))
 
     print("the closing a stop gate reads is the TAIL, unquoted and present-tense:")
     _gsrc = read_or_empty(os.path.join(REPO, ".game_loop", "bin", "_gl_impl.py"))
