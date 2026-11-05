@@ -10728,6 +10728,44 @@ def main():
               _call("mcp__drops-fi__file_ticket")[0] == "deny")
         _set(mcp_standing_writes=[])
 
+        # #140: A NAMESPACE IN THE VERB SLOT. drops-fi's fleet tools lead with `fleet_`, so the verb
+        # slot reads `fleet` and every one is unclassifiable, and the project's EXACT grants for
+        # them were never read: standing was consulted only on the mutating branch. Each fleet
+        # offer then lapsed to a paid API key because the worker could not fetch its brief.
+        _FB = "mcp__drops-fi__fleet_brief"
+        _set(mcp_standing_writes=[])
+        _fd0, _fr0 = _call(_FB)
+        check("#140 control: with no grant, a namespace-led tool is still refused as UNCLASSIFIABLE "
+              "— the fail-closed default this change must not loosen",
+              _fd0 == "deny" and "could not be classified" in _fr0)
+        check("#140: ...and that refusal now names the honest standing remedy, the exact tool in "
+              "mcp_standing_writes, instead of only the hatch",
+              'mcp_standing_writes: ["' + _FB + '"]' in _fr0)
+        _set(mcp_standing_writes=[_FB, "mcp__drops-fi__fleet_submit"])
+        check("#140: an EXACT mcp_standing_writes entry now covers an unclassified verb — the "
+              "reported grant, inert until now",
+              _call(_FB)[0] == "allow" and _call("mcp__drops-fi__fleet_submit")[0] == "allow")
+        check("#140: ...and only the tools it names: an ungranted sibling with the same namespace "
+              "is still refused",
+              _call("mcp__drops-fi__fleet_poll")[0] == "deny")
+        _flp = os.path.join(sw, ".game_loop", "log.jsonl")
+        _fld = [json.loads(_l) for _l in (open(_flp).read().splitlines()
+                                          if os.path.exists(_flp) else [])
+                if '"standing_mcp_write"' in _l and _FB in _l]
+        check("#140: ...and the allow is logged as an EXACT grant standing in for an UNCLASSIFIED "
+              "verb, so an audit can count those apart",
+              bool(_fld) and _fld[-1].get("grain") == "exact"
+              and _fld[-1].get("unclassified") is True)
+        _set(mcp_standing_writes=["mcp__drops-fi__"])
+        check("#140: a whole-server PREFIX does NOT cover an unclassified verb — a prefix is written "
+              "against tools nobody has seen, and granting the unknown in bulk is what fail-closed "
+              "is for",
+              _call(_FB)[0] == "deny")
+        _set(mcp_standing_writes=[_FB], mcp_writes="disabled")
+        check("#140: ...and mcp_writes: \"disabled\" still beats an exact grant for one",
+              _call(_FB)[0] == "deny")
+        _set(mcp_standing_writes=[], mcp_writes="gated")
+
         # A SESSION VERB NO GRANT COULD REACH. A device walkthrough held a whole-server grant and
         # still spent one hatch use per redeploy, because `connect` was on neither list and standing
         # writes are consulted only on the mutating branch.

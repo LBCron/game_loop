@@ -582,6 +582,32 @@ for keypath, val in leaves(payload.get("tool_input") or {}):
 findings = list(dict.fromkeys(findings))
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
+def allow_standing(grain, via=None, classified=True):
+    """ALLOW under mcp_standing_writes, logged like an authorize spend (#41): "allowed by standing
+    policy" and "never ran" must stay distinguishable afterwards. It records WHICH grant allowed
+    it, not merely that one did: an audit that cannot tell an enumerated tool from a whole-server
+    rule cannot review the rule. Also whether the verb was classified (#140), so an exact grant
+    standing in for an unknown verb can be counted apart from one that confirmed a known one."""
+    try:
+        log_f = os.path.join(os.environ["GAMELOOP_DIR"], "log.jsonl")
+        with open(log_f, "a") as f:
+            rec = {"t": datetime.datetime.now().isoformat(timespec="seconds")}
+            sid = os.environ.get("SID", "")
+            if sid:
+                rec["sid"] = sid[:8]
+            rec.update({"kind": "standing_mcp_write", "tool": tool, "verb": first,
+                        "grain": grain})
+            if via:
+                rec["via"] = via
+            if not classified:
+                rec["unclassified"] = True
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    print("ALLOW")
+    sys.exit(0)
+
+
 hard_hit = sorted(set(words) & HARD_VERBS)
 trusted_by = sorted(t for t in trusted_ok if tool.startswith(t))
 if trusted_by and mcp_writes != "disabled":
@@ -618,26 +644,7 @@ elif first in MUTATE_VERBS:
     lands = sorted(set(words) & LANDING_VERBS)
     grain = "exact" if tool in standing_ok else ("prefix" if by_prefix and not lands else "")
     if mcp_writes != "disabled" and grain:
-        try:
-            log_f = os.path.join(os.environ["GAMELOOP_DIR"], "log.jsonl")
-            with open(log_f, "a") as f:
-                rec = {"t": datetime.datetime.now().isoformat(timespec="seconds")}
-                sid = os.environ.get("SID", "")
-                if sid:
-                    rec["sid"] = sid[:8]
-                # Logged like an authorize spend (#41): "allowed by standing policy" and "never ran"
-                # must stay distinguishable afterwards.
-                # WHICH grant allowed it, not merely that one did: an audit that cannot tell an
-                # enumerated tool from a whole-server rule cannot review the rule.
-                rec.update({"kind": "standing_mcp_write", "tool": tool, "verb": first,
-                            "grain": grain})
-                if grain == "prefix":
-                    rec["via"] = by_prefix[0]
-                f.write(json.dumps(rec) + "\n")
-        except OSError:
-            pass
-        print("ALLOW")
-        sys.exit(0)
+        allow_standing(grain, by_prefix[0] if grain == "prefix" else None)
     kind = "MUTATING"
     if by_prefix and lands:
         why = ("its verb '" + lands[0] + "' LANDS work, and the standing grant covering it is the\n"
@@ -650,6 +657,28 @@ elif first in MUTATE_VERBS:
 elif first in READ_VERBS or named_read_only:
     print("ALLOW")
     sys.exit(0)
+elif tool in standing_ok and mcp_writes != "disabled":
+    # AN EXACT NAME IS A STRONGER STATEMENT THAN A VERB (#140). Some servers lead their tool names
+    # with a NAMESPACE, not a verb (`mcp__drops-fi__fleet_brief`, `fleet_submit`, `fleet_extend`),
+    # so the verb slot reads `fleet` and the call is unclassifiable. A project that typed the exact
+    # tool into mcp_standing_writes had already made the deliberate per-tool decision #56 asks for,
+    # and the grant was never read, because standing was consulted only on the mutating branch.
+    # Cost, observed: every fleet offer lapsed to a paid API key while the worker could not fetch
+    # its brief, on a loop polling every couple of minutes, so a hatch spend per call was no remedy.
+    #
+    # Nothing weakens by this. The argument findings and the irreversible-verb branch above have
+    # already returned, and an exact entry naming a HARD verb never entered standing_ok. "Unknown
+    # verb" is treated as "possibly writes", which is the side a grant exists for: an exact grant
+    # says "this tool may write, standing", true whatever the tool does.
+    #
+    # EXACT ONLY, NEVER A PREFIX. A prefix is a rule written once against tools that did not exist
+    # yet; letting it cover a verb nobody has classified would grant the unknown in bulk, which is
+    # the half the fail-closed default is for.
+    #
+    # REJECTED: reading the first KNOWN verb after the namespace (`fleet_submit` -> `submit`). It
+    # re-classifies tools on every server at once, including under existing prefix grants, so it
+    # widens grants nobody re-read, and it only covers a namespace whose second word is listed.
+    allow_standing("exact", classified=False)
 else:
     kind = "UNCLASSIFIABLE"
     why = ("its verb '" + (first or "?") + "' is in neither the read-only nor the mutating list, so "
@@ -768,8 +797,10 @@ else:
             "  ambiguity — it can never silence a mutating verb or a mutating argument.\n\n"
             "If the tool WRITES anything, even reversibly, do NOT list it as read-only: that is a\n"
             "false statement the guard will then act on. Authorize the call (below), and report the\n"
-            "verb '" + (first or "?") + "' upstream so it can be classified — once it is a mutating\n"
-            "verb, mcp_standing_writes can grant this exact tool standing (#131).")
+            "verb '" + (first or "?") + "' upstream so it can be classified.\n\n"
+            "If a HUMAN wants it to write standing, without a hatch per call, name this tool EXACTLY:\n"
+            "  .game_loop/config.json -> mcp_standing_writes: [\"" + tool + "\"]\n"
+            "  An exact name covers an unclassified verb (#140); a whole-server prefix does not.")
 
 print("DENY")
 if mcp_writes == "disabled":

@@ -398,6 +398,13 @@ need the tool named exactly. Under an enumeration, granting one was the delibera
 out; under a prefix it would be inherited from which list a verb happens to sit in — and that is the
 difference between an agent posting its review unattended and an agent landing code unattended.
 
+The same line runs the other way for a tool the guard **cannot classify** — a name whose verb slot
+holds a namespace (`mcp__srv__fleet_brief` reads its verb as `fleet`). An exact entry covers it
+(#140): typing the tool out is the per-tool decision, and "this may write, standing" is true whatever
+the tool does. A prefix does not, because it would grant unclassified tools in bulk, including ones
+the server has not shipped yet. Classifying by the first *known* word after a namespace was rejected:
+it would silently reclassify tools on every server, under prefix grants nobody re-read.
+
 What it still cannot see is stated in the file: what a server actually *does* behind a read-only name,
 effects downstream of a call it allowed, a mutation hidden in an opaque blob or a stored-procedure
 handle, and any MCP call made where this hook is not installed. Silence from it is not evidence of

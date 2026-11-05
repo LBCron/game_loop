@@ -213,7 +213,8 @@ reduces the damage, it does not remove the class.
   truthy `force:`), are refused. **The argument always wins** — a read-named `query` tool carrying
   `DELETE FROM` is still blocked — and anything it cannot classify fails **closed**. Same hatch,
   spelled with the tool name: `authorize --path mcp__<server>__<tool> --reason "<their words>"`.
-  A project may pre-authorise a narrow set in `config.json` (`mcp_standing_writes`), declare whole
+  A project may pre-authorise a narrow set in `config.json` (`mcp_standing_writes`; an EXACT name
+  there also covers a tool whose verb cannot be classified, a prefix never does), declare whole
   servers it OWNS (`mcp_trusted_servers` — every call allowed, destructive included), or shut the
   plane off entirely (`mcp_writes: "disabled"`) — see Configure in `README.md`. You cannot set any
   of them — and that is now a REFUSAL at the write, not a sentence you are asked to honour. They

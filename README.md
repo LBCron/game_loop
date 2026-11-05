@@ -482,6 +482,11 @@ a prefix widens *which servers* are trusted, never *what* may be done through th
 does **not** inherit — `merge`, `publish`, `deploy`, `release`, `push` still need the tool named
 exactly. Typing it out is the deliberate act; inheriting it from which list a verb sits in is not.
 
+An **exact** name also covers a tool the guard cannot classify — a server whose names lead with a
+namespace (`mcp__srv__fleet_submit` reads its verb as `fleet`) is otherwise refused whatever config
+says. A prefix does not: it was written against tools nobody had seen, and the unknown is exactly
+what failing closed is for.
+
 **When the server is yours.** `mcp_standing_writes` deliberately stops short of the irreversible
 and landing tiers — right for a server somebody else ships, wrong for one your team wrote and
 maintains, where you already own the blast radius. For that, declare the server outright:

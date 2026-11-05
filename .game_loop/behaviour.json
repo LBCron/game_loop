@@ -677,6 +677,15 @@
       "change": "The `stop` triggers now share one time budget that ends before the Stop hook's own timeout: stop_trigger_budget_sec (default 60), cut to the stopgate hook's timeout in .claude/settings.json minus 4s when that is shorter. A trigger is capped to what is left, and one that does not fit is SKIPPED with a notice naming it. The shipped stopgate hook timeout is 120 (was 10), and re-running install raises an existing shorter stopgate timeout to the template's (never lowers one).",
       "why_it_qualifies": "Stop-gate behaviour and installed settings change. Reported in #133: with triggers totalling about 35s against a 10s hook, the harness killed stopgate on every turn-end, so the gate never refused anything and one armed question was logged as spent 683 times while its count moved 16.",
       "consequence": "The gate's verdict is always written: refusals reach the agent and an armed question is consumed once. A project whose stop triggers take longer than its hook allows sees them cut short or skipped, named, instead of the whole gate silently dying. Existing installs on a 10s hook are protected immediately (the budget reads the hook's timeout) and get 120 on their next install."
+    },
+    {
+      "seq": 72,
+      "sha": "(this commit)",
+      "notice": true,
+      "verb": "the MCP guard, on a tool whose verb it cannot classify",
+      "change": "an EXACT mcp_standing_writes entry now allows a tool the guard cannot classify (#140), where before standing writes were read only for a verb already classified as mutating, so such a grant was silently inert. A whole-server PREFIX still does not cover an unclassified verb. Argument findings, irreversible verbs and mcp_writes: \"disabled\" still refuse first. The UNCLASSIFIABLE refusal now names the exact-grant remedy, and each such allow is logged as standing_mcp_write with grain exact and unclassified: true.",
+      "consequence": "a tool you named exactly in mcp_standing_writes now runs unattended even if its name leads with a namespace (`fleet_submit`). If you put an exact entry there expecting it to stay refused until the verb was classified, it no longer is. A prefix grant behaves as before.",
+      "why_it_qualifies": "a consumer who changed nothing has calls allowed that were refused. Reported by drops-fi: six exact grants for its `fleet_*` tools were never read, because the verb slot held the namespace `fleet`, and each fleet offer lapsed to a paid API key while the worker could not fetch its brief."
     }
   ],
   "schema": 1
