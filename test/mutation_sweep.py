@@ -683,6 +683,26 @@ MUTANTS = [
      "NEUTERED TO None IS THE REPORTED WORLD: \"ATTRIBUTED\" written where the commit gate never reads. "
      "The Crawler controls pass by construction under this neuter and exist for the opposite one, a "
      "copy that always defers. MEASURED 2026-11-04 at 427ed2f, in a CLONE, by neutering by hand and listing the suite's FAIL rows.", 4),
+    ("snapshot_age -> no stored usage snapshot ever has a capture time",
+     ".game_loop/bin/_gl_impl.py::snapshot_age", "    return None\n",
+     ['gate denies ordinary work over the threshold', "names the session's OWN handoff path",
+      'a sibling session that wrote nothing', 'SAYS it is stale and ignored',
+      'snapshot_max_age_sec` sets the bound outright', 'captured just now closes the gate again',
+      'the SAME number the gate and status use', 'AUTO handoff does NOT satisfy the limit gate',
+      'the GATE itself arms for that editor-hosted session'],
+     "NEUTERED, EVERY STORED SNAPSHOT IS AN UNKNOWN and the usage half of the limit gate never closes: "
+     "the fail-open direction, which is why so many of the gate's own rows catch it. MEASURED "
+     "2026-11-05 on d30a687 plus this change, in a CLONE, by neutering by hand and listing the suite's "
+     "FAIL rows: 11, of which 2 are this sweep's own bookkeeping rows (the new producers were not yet "
+     "entered), so the floor is the 9.", 9),
+    ("watchdog fresh_snapshot -> no snapshot is ever fresh enough to start a park",
+     ".game_loop/bin/watchdog::fresh_snapshot", "    return None\n",
+     ['park, then ring at reset', 'starts a fresh ring budget', 'park and resume both page',
+      'usage-limit park is untouched'],
+     "NEUTERED, THE PARK NEVER ARMS and a run rings into an exhausted window. The stale-snapshot row "
+     "passes by construction under this neuter and exists for the opposite one, a park started on any "
+     "snapshot. MEASURED 2026-11-05, in a CLONE, by neutering by hand: 6 FAIL rows, 2 of them this "
+     "sweep's own bookkeeping, so the floor is the 4.", 4),
     ("unbound_mandate_notice -> the notice never has anything to say",
      ".game_loop/bin/_gl_impl.py::unbound_mandate_notice", '    return ""\n',
      ['FIRES on the case it exists for', 'never REFUSES', 'says so in BOTH directions'],

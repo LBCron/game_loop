@@ -164,6 +164,17 @@ front yard — and prints chaining instructions otherwise. Everything downstream
 watchdog's park) reads the snapshot; a session that never rendered a status line has no snapshot, and
 every consumer treats that as *absence of signal, not evidence of headroom*, and fails open.
 
+**An old snapshot is treated the same way.** A usage percentage is a share of an allowance that
+moves: Anthropic applies usage multipliers from time to time, and a plan upgrade or downgrade
+rescales it, so the same usage can read higher or lower in the middle of one window. (This repo
+used to assume the percentage only rose until a reset. It was retracted after a desktop-app session
+showed weekly 88% against the app's 84%.) A snapshot older than the longest gap between legitimate
+refreshes is therefore an unknown. By default that gap is the probe's `max_interval_sec` plus 600 s,
+70 minutes in all, and `limits.snapshot_max_age_sec` overrides it. `status` prints every snapshot's
+age and says when it is stale; the limit gate ignores a stale one, and the watchdog will not *start*
+a park on one. A park already running keeps reading the raw snapshot, because nothing refreshes it
+while the account is rate-limited, and an age cut there would wake the run into a dead wall.
+
 ---
 
 ## The guardrails

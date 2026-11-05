@@ -576,6 +576,30 @@ def exhausted_windows(snap, now_epoch):
     return out
 
 
+def snapshot_max_age_sec():
+    """The twin of snapshot_max_age_sec() in bin/_gl_impl.py, which says why the bound exists and
+    why it is derived from the probe's longest interval. test/run.py holds the two equal."""
+    try:
+        explicit = int(_LC.get("snapshot_max_age_sec") or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        return explicit
+    pc = ((_merged_config(CONFIG_F).get("limits") or {}).get("probe") or {})
+    lo = int(pc.get("min_interval_sec", 900) or 900)
+    hi = int(pc.get("max_interval_sec", 3600) or 3600)
+    return max(lo, hi) + 600
+
+
+def fresh_snapshot(snap, now_epoch):
+    """The snapshot if it is recent enough to START a park on, else None. Twin of _gl_impl.py's."""
+    try:
+        age = max(0.0, now_epoch - float((snap or {}).get("captured_at")))
+    except (TypeError, ValueError):
+        return None
+    return snap if age <= snapshot_max_age_sec() else None
+
+
 def _fmt_reset(epoch):
     try:
         return datetime.datetime.fromtimestamp(float(epoch)).strftime("%a %H:%M")
@@ -633,8 +657,24 @@ def park_until_limit_resets(state):
     quit Claude Code entirely there is no process left to wake — this survives a rate-limited
     SESSION, not a closed laptop.
     """
-    snap = limits_snapshot()
+    # FRESH TO START, NOT TO STAY. A usage percentage can move mid-window (allowance multipliers,
+    # plan changes; see _gl_impl.py's snapshot_max_age_sec), so a stale snapshot must not START a park.
+    # Once parked, nothing refreshes the snapshot (the API is what ran dry), so the loop below keeps
+    # reading the raw one: an age cut there would end a real park into a dead wall.
+    raw = limits_snapshot()
+    snap = fresh_snapshot(raw, time.time())
     over = exhausted_windows(snap, time.time())
+    if not over and raw and (raw.get("windows") or {}) and snap is None:
+        # Present but too old is its own fact, not "no snapshot": logged once per session so a run
+        # that could not park is distinguishable afterwards from one that did not need to.
+        st = load_state()
+        if not st.get("limit_stale_logged"):
+            st["limit_stale_logged"] = True
+            save_state(st)
+            logline({"kind": "watchdog_limit_stale",
+                     "detail": "usage snapshot older than %ds; the park cannot arm on it"
+                               % snapshot_max_age_sec()})
+        return
     if not over:
         # "no window is exhausted" and "I have no idea" are the SAME empty list here, and the second
         # one means this function can never fire — no park, no ring at reset. Record it once per

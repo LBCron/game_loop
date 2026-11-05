@@ -2112,6 +2112,47 @@ def main():
             f.write("# handoff for lg1\n")
         check("a session's handoff opens the gate for THAT session", not denied(limitgate(p1)))
         check("...but not for a sibling session that wrote nothing", denied(limitgate(p2)))
+
+        # A SNAPSHOT IS A READING ONLY WHILE IT IS RECENT (2026-11-05). A usage percentage can move
+        # mid-window, because Anthropic applies allowance multipliers and a plan change rescales it;
+        # a desktop-app session's status showed weekly 88% while the app said 84%. Past its age bound
+        # the snapshot is an unknown, and an unknown fails open like a missing one.
+        print("limit gate (a stale snapshot is an unknown):")
+        _fresh_at = snap.get("captured_at")
+        snap["captured_at"] = now_epoch - 5 * 3600     # past the derived bound (3600 + 600)
+        json.dump(snap, open(limits_f, "w"))
+        check("a snapshot over the threshold but hours old does not close the gate — the same "
+              "sibling the fresh one refused just above",
+              not denied(limitgate(p2)))
+        _st = gl(proj, "status").stdout
+        check("...and status SAYS it is stale and ignored, with its age, rather than printing it as "
+              "current",
+              "captured 5h ago" in _st and "⚠ STALE" in _st and "IGNORE it" in _st)
+        snap.pop("captured_at")
+        json.dump(snap, open(limits_f, "w"))
+        check("a snapshot with no capture time is an unknown too, not a fresh one",
+              not denied(limitgate(p2))
+              and "capture time unknown" in gl(proj, "status").stdout)
+        _lcf = os.path.join(proj, ".game_loop", "config.local.json")
+        _lc_before = read_or_empty(_lcf)
+        snap["captured_at"] = now_epoch - 5 * 3600
+        json.dump(snap, open(limits_f, "w"))
+        with open(_lcf, "w") as f:
+            json.dump(dict(json_text(_lc_before) or {}, limits={"snapshot_max_age_sec": 86400}), f)
+        check("`limits.snapshot_max_age_sec` sets the bound outright: the same 5h-old snapshot binds "
+              "under a one-day bound",
+              denied(limitgate(p2)))
+        if _lc_before:
+            with open(_lcf, "w") as f:
+                f.write(_lc_before)
+        else:
+            os.remove(_lcf)
+        snap["captured_at"] = _fresh_at or now_epoch
+        json.dump(snap, open(limits_f, "w"))
+        _st = gl(proj, "status").stdout
+        check("control: the same snapshot captured just now closes the gate again, and status shows "
+              "its age without the stale warning",
+              denied(limitgate(p2)) and "captured " in _st and "⚠ STALE" not in _st)
         os.remove(limits_f)
 
         # A SECOND TRIGGER ON THE SAME GATE. A nearly-exhausted usage window is only one way to run
@@ -3493,6 +3534,31 @@ def main():
 
         print("watchdog parks at an exhausted limit and rings at reset:")
         gl(proj, "mandate", "--set", "limit park work", sid="sess-park")
+        # FRESH TO START: an exhausted reading hours old must not start a park, because a usage
+        # percentage can move mid-window. The fresh park below is the control for this one.
+        json.dump({"captured_at": _t.time() - 5 * 3600,
+                   "windows": {"five_hour": {"used_percentage": 99.5,
+                                             "resets_at": _t.time() + 3600}}},
+                  open(limits_f, "w"))
+        FakeSlack.posts.clear()
+        r = run_watchdog(wd_bin, {"session_id": "sess-park", "transcript_path": tpath},
+                         WATCHDOG_IDLE_SEC="1", WATCHDOG_SETTLE_SEC="0",
+                         WATCHDOG_RESUME_BUFFER_SEC="0")
+        check("a STALE exhausted snapshot does not start a park — no page, no hour-long sleep — and "
+              "the log says the park could not arm on it, which is not the same as 'no snapshot'",
+              not any("parked" in json.dumps(b) for _, b in FakeSlack.posts)
+              and '"kind": "watchdog_limit_stale"' in read_or_empty(
+                  os.path.join(proj, ".game_loop", "log.jsonl"))
+              and "usage window" not in r.stderr)
+        # THE TWO COPIES OF THE BOUND MUST AGREE: the watchdog derives it on its own (it is a separate
+        # script by design), so the number it logged is compared with the one status prints.
+        _wd_bound = re.findall(r"older than (\d+)s; the park", read_or_empty(
+            os.path.join(proj, ".game_loop", "log.jsonl")))
+        _gl_bound = re.findall(r"\((\d+)s\), so the limit gate",
+                               gl(proj, "status", sid="sess-park").stdout)
+        check("...and the watchdog's bound is the SAME number the gate and status use, so the two "
+              "copies cannot drift apart unseen",
+              bool(_wd_bound) and _gl_bound == _wd_bound[-1:])
         json.dump({"captured_at": _t.time(),
                    "windows": {"five_hour": {"used_percentage": 99.5,
                                              "resets_at": _t.time() + 2}}},
@@ -16320,7 +16386,9 @@ def main():
               "USAGE-LIMIT PROTECTION IS INERT" in _vs("status").stdout)
         _lf = os.path.join(lw, ".game_loop", "limits.json")
         with open(_lf, "w") as f:
-            json.dump({"t": "now", "windows": {"five_hour": {"used_percentage": 99.2,
+            # captured_at, as every real snapshot carries: one without it is an unknown and fails open.
+            json.dump({"t": "now", "captured_at": int(time.time()),
+                       "windows": {"five_hour": {"used_percentage": 99.2,
                                                              "resets_at": int(time.time()) + 3600}}}, f)
         check("...and a snapshot written by a TERMINAL session in the same checkout clears it — the "
               "host that cannot produce one can still consume one",

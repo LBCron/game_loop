@@ -1769,12 +1769,58 @@ class limits_lock:
         return False
 
 
+# A SNAPSHOT IS A READING ONLY WHILE IT IS RECENT. binding_windows used to say the reset time, "not
+# snapshot age, is the correct staleness test", because used_percentage "is monotonic within a window
+# and only ever falls by resetting". RETRACTED 2026-11-05. The percentage is a share of an allowance
+# that moves: Anthropic applies usage multipliers (50% more for a while, later 25%), and a plan
+# upgrade or downgrade rescales it sharply. Observed the same day on a host with no statusline: the
+# snapshot said weekly 88% while the app said 84%. An old snapshot can overstate (closing this gate or
+# parking a run for nothing) or understate (missing a real crossing), so past this age it is an
+# UNKNOWN, and an unknown fails open like a missing snapshot (INV5).
+#
+# THE BOUND IS THE LONGEST GAP BETWEEN LEGITIMATE REFRESHES, so a working host never trips it: a
+# terminal statusline rewrites the snapshot about every minute, and the probe may wait up to
+# max_interval_sec, plus slack for the probe's own run (~75s measured) and a watchdog cycle. A host
+# that refreshes from neither, such as the desktop app or VS Code, goes stale and `status` says so.
+SNAPSHOT_REFRESH_SLACK_SEC = 600
+
+
+def snapshot_max_age_sec():
+    """How old a usage snapshot may be and still be decided on. `limits.snapshot_max_age_sec` sets it
+    outright; otherwise it is derived from the probe's longest interval (see the block above)."""
+    try:
+        explicit = int(limits_cfg().get("snapshot_max_age_sec") or 0)
+    except (TypeError, ValueError):
+        explicit = 0                    # a bound nobody can parse is not a bound: use the derived one
+    if explicit > 0:
+        return explicit
+    pc = probe_cfg()
+    return max(pc["min_interval_sec"], pc["max_interval_sec"]) + SNAPSHOT_REFRESH_SLACK_SEC
+
+
+def snapshot_age(snap, now_epoch):
+    """Seconds since the snapshot was captured, or None when it carries no usable capture time —
+    which is not 'new'. A capture time slightly in the future (clock skew) reads as age 0."""
+    try:
+        at = float((snap or {}).get("captured_at"))
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, now_epoch - at)
+
+
+def fresh_snapshot(snap, now_epoch):
+    """The snapshot if it is recent enough to decide on, else None (an unknown, not a reading)."""
+    age = snapshot_age(snap, now_epoch)
+    return snap if age is not None and age <= snapshot_max_age_sec() else None
+
+
 def binding_windows(snap, pct, now_epoch):
     """Windows at/over pct whose reset is still ahead: [(name, window), ...].
 
-    A resets_at in the past means the window rolled over since the snapshot — whatever it said no
-    longer binds. That, not snapshot age, is the correct staleness test: used_percentage is monotonic
-    within a window and only ever falls by resetting.
+    A resets_at in the past means the window rolled over since the snapshot, so whatever it said no
+    longer binds. That is NOT the whole staleness test: callers deciding on a stored snapshot pass it
+    through fresh_snapshot first (see the block above for why age matters). The statusline passes a
+    live payload, which is fresh by construction.
     """
     out = []
     for name, w in ((snap or {}).get("windows") or {}).items():
@@ -1941,6 +1987,39 @@ def limits_summary(snap):
         except (TypeError, ValueError, KeyError):
             continue
     return " · ".join(parts) or None
+
+
+def _fmt_age(sec):
+    sec = int(sec)
+    if sec < 90:
+        return f"{sec}s"
+    if sec < 5400:
+        return f"{sec // 60}m"
+    if sec < 172800:
+        return f"{sec // 3600}h"
+    return f"{sec // 86400}d"
+
+
+def limits_status_lines(snap, lim, now_epoch):
+    """The `limits:` lines of `status`: the reading, ALWAYS with its age, and LOUD when it is too old
+    to decide on. Reported 2026-11-05: a desktop-app session's status showed 5h 11% and weekly 88%
+    while the app showed 2% and 84%, and nothing said the line was days old; the capture time was
+    stored and never printed."""
+    age = snapshot_age(snap, now_epoch)
+    if age is None:
+        return ["limits: " + lim + "  (capture time unknown, so the gates do not act on it)"]
+    line = f"limits: {lim}  (captured {_fmt_age(age)} ago)"
+    if fresh_snapshot(snap, now_epoch) is None:
+        return [line,
+                f"  ⚠ STALE — older than {_fmt_age(snapshot_max_age_sec())} "
+                f"({snapshot_max_age_sec()}s), so the limit gate and the watchdog's park IGNORE it.",
+                "    A usage percentage can move mid-window (allowance multipliers, plan changes), so an "
+                "old one",
+                "    is an unknown, not a lower bound. Fresh readings come from a terminal statusline or "
+                "the",
+                "    probe (limits.probe.enabled); read the real figures in the app meanwhile."]
+    over = binding_windows(snap, float(limits_cfg()["threshold_pct"]), now_epoch)
+    return [line + ("  ⚠ HANDOFF DUE — the limitgate is closed" if over else "")]
 
 
 def probe_reading(doc):
@@ -2153,7 +2232,8 @@ def _limitgate_verdict(s, payload, now_epoch):
     sb = binding_spawn_block(s, payload)
     if sb:
         return False, _spawn_block_reason(s, sb)
-    snap = load_limits()
+    # A stale snapshot is an unknown and fails open like a missing one; `status` says it is stale.
+    snap = fresh_snapshot(load_limits(), now_epoch)
     lc = limits_cfg()
     over = binding_windows(snap, float(lc["threshold_pct"]), now_epoch) if snap else []
     ctx = binding_context(s)
@@ -12679,8 +12759,7 @@ def cmd_status(s, a):
     snap = load_limits()
     lim = limits_summary(snap) if snap else None
     if lim:
-        over = binding_windows(snap, float(limits_cfg()["threshold_pct"]), time.time())
-        out("limits: " + lim + ("  ⚠ HANDOFF DUE — the limitgate is closed" if over else ""))
+        out(*limits_status_lines(snap, lim, time.time()))
     if (w := limits_inert_warning(snap)):   # says what is OFF, not merely that a file is missing
         out(w)
     if notify:
