@@ -5296,6 +5296,73 @@ def authorize_revoke(s, a):
         "  human's original words, because the record that a hatch was opened outlives the hatch.")
 
 
+def recent_hooked_sessions(limit=3):
+    """[(sid, seconds since its hooks last ran)], newest first, from the write guard's mark.
+
+    The mark (`sessions/SID/write-guard-probe`) is the evidence `session_home` already trusts:
+    only a hook leaves it, so a session listed here is one whose guards really read that directory.
+    """
+    found = []
+    try:
+        names = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return []
+    t = time.time()
+    for d in names:
+        try:
+            found.append((d, max(0, int(t - os.path.getmtime(
+                os.path.join(SESSIONS_DIR, d, "write-guard-probe"))))))
+        except OSError:
+            continue
+    return sorted(found, key=lambda x: x[1])[:limit]
+
+
+def sessionless_grant_refusal(a):
+    """The refusal text when a grant would be recorded where no guard can spend it (#143), else None.
+
+    Reported from the desktop app: the human typed the suggested `authorize` into its inline shell,
+    which carries no session id, so the grant went to the repo-global legacy state. It printed
+    "AUTHORIZED", and the retry was refused again, because every guard reads the CALLING session's
+    own state (sessions/SID/state.json, SID from the hook payload) and none reads the legacy file.
+    A hatch reported open that cannot open is the silent wrong answer this tool exists to refuse,
+    and the human cannot see it from the output.
+
+    REFUSED ONLY WHERE HOOKS HERE HAVE PROVED THEY CARRY SESSION IDS, i.e. some session has left the
+    write guard's mark. A harness that delivers no session id spends from the legacy state, so with
+    no such mark the old behaviour stands. `GAME_LOOP_SESSION=""` (set and empty) is the documented
+    deliberate choice of the legacy state and is honoured.
+
+    FIXED HERE, NOT IN EACH REFUSAL. A dozen refusals across three guards print an authorize hint;
+    filling a session id into each would be a dozen places to keep in step. Every grant passes
+    through this verb, so this is the one place that can catch all of them.
+    """
+    if SESSION or "GAME_LOOP_SESSION" in os.environ:
+        return None
+    recent = recent_hooked_sessions()
+    if not recent:
+        return None
+    bin_ = os.path.join(CODE_ROOT, "bin", "game_loop")
+    lines = ["REFUSED — no session id here, so this grant would land where no guard reads it.",
+             "",
+             "Every guard spends grants from the session that made the refused call (its own",
+             "state under .game_loop/sessions/). This shell carries no GAME_LOOP_SESSION or",
+             "CLAUDE_CODE_SESSION_ID (a terminal, or the desktop app's inline shell), so the grant",
+             "would go to the repo-wide .game_loop/state.json, report AUTHORIZED, and never be",
+             "spent (#143).",
+             "",
+             "Name the session that was refused. Sessions whose guards ran most recently:"]
+    for sid, age in recent:
+        lines.append(f"  {sid[:8]}  guards last ran {_fmt_age(age)} ago")
+    lines += ["", "and re-run with its id, e.g. for the newest:",
+              f"  GAME_LOOP_SESSION={recent[0][0]} {bin_} authorize --path {shlex.quote(a.path)} "
+              f"--reason {shlex.quote(a.reason)}" + (f" --uses {a.uses}" if a.uses else ""),
+              "",
+              "Inside an agent's own Bash the id is already set, so the agent can run it unchanged.",
+              "A harness whose hooks carry NO session id spends from the repo-wide state; choose it",
+              "on purpose with GAME_LOOP_SESSION=\"\" (set and empty)."]
+    return "\n".join(lines)
+
+
 def cmd_authorize(s, a):
     """Record ONE human-authorized mutation outside this repo. Consumed on use, logged forever.
 
@@ -5313,6 +5380,9 @@ def cmd_authorize(s, a):
     if not a.path or not a.reason:
         die("authorize needs --path <prefix> and --reason \"<the human's own words>\".\n"
             "This is a HUMAN escape hatch, not a convenience. Quote them, don't paraphrase.")
+    unreachable = sessionless_grant_refusal(a)
+    if unreachable:
+        die(unreachable)
     # A BRIEF IS NOT A HUMAN (#68). An unattended Crawler spent this hatch twice on its own prompt,
     # recording "brief instructs: ..." as the human's words. From inside that session the brief IS
     # the instruction from its principal — the only voice it hears, arriving exactly as a human
@@ -8721,9 +8791,20 @@ def cmd_sessionstart(s, a, payload):
     agent chooses to act on it, which is rung 6 of the ladder applied to the gap that decides whether
     any other rung runs at all (INV1). So this runs the verb, not an advertisement for it.
 
-    PostCompact matters as much as SessionStart: compaction is exactly when a run loses the mandate,
-    the pins and the invariants, and this repo's own instruction has always been "run status every
-    session AND after any compaction". Now the harness does it.
+    A compaction matters as much as a fresh start: it is exactly when a run loses the mandate, the
+    pins and the invariants, and this repo's own instruction has always been "run status every
+    session AND after any compaction". Claude Code covers it by running SessionStart hooks AGAIN
+    after a compaction, with `source: "compact"`, and their additionalContext reaches the model.
+
+    NOT PostCompact (#141). This was registered on PostCompact too, on the reading that the event
+    was in the settings schema's enum. Registered is not delivered: read in the Claude Code 2.1.318
+    binary, a PostCompact hook's result becomes only `userDisplayMessage`, shown to the human and
+    never to the model, and its hookSpecificOutput is VALIDATED against an event list PostCompact
+    is not in. So echoing the event name failed validation after every compaction, loudly in the
+    /compact output, while the SessionStart(compact) run beside it delivered the context. A
+    PostCompact payload is answered with silence, for installs that still carry the registration;
+    install.sh retires it. Relabelling the output "SessionStart" was rejected: it would validate,
+    and then print the whole status as JSON at the human after every compaction.
 
     THREE THINGS IT HAS TO GET RIGHT, or it becomes the defect it fixes:
       * NEVER BLOCKS. A first impression that bricks a session is one nobody gives a second chance,
@@ -8740,6 +8821,10 @@ def cmd_sessionstart(s, a, payload):
     """
     if not config().get("session_start", True):
         return                       # a project that wants silence gets silence, opt-out not opt-in
+    if payload.get("hook_event_name") == "PostCompact":
+        # Silent, and BEFORE the probe and the triggers: SessionStart(compact) runs next and does
+        # all three. Firing triggers here too would act twice for one compaction (#141).
+        return
     try:
         os.makedirs(os.path.dirname(SESSION_START_PROBE), exist_ok=True)
         with open(SESSION_START_PROBE, "w") as f:
@@ -13783,7 +13868,7 @@ def main():
     sub.add_parser("limitgate")   # PreToolUse entrypoint (usage-limit handoff gate); not for humans
     sub.add_parser("crongate")    # PreToolUse entrypoint (recurring CronCreate refusal); not for humans
     sub.add_parser("statusline")  # statusline entrypoint (limits tap + one-row render); not for humans
-    sub.add_parser("sessionstart")  # SessionStart/PostCompact entrypoint; not for humans
+    sub.add_parser("sessionstart")  # SessionStart entrypoint (also after compaction); not for humans
     md = sub.add_parser("model")
     md.add_argument("--json", action="store_true",
                     help="emit the verdict as JSON — the form a PARENT reads, since the session "

@@ -686,6 +686,42 @@
       "change": "an EXACT mcp_standing_writes entry now allows a tool the guard cannot classify (#140), where before standing writes were read only for a verb already classified as mutating, so such a grant was silently inert. A whole-server PREFIX still does not cover an unclassified verb. Argument findings, irreversible verbs and mcp_writes: \"disabled\" still refuse first. The UNCLASSIFIABLE refusal now names the exact-grant remedy, and each such allow is logged as standing_mcp_write with grain exact and unclassified: true.",
       "consequence": "a tool you named exactly in mcp_standing_writes now runs unattended even if its name leads with a namespace (`fleet_submit`). If you put an exact entry there expecting it to stay refused until the verb was classified, it no longer is. A prefix grant behaves as before.",
       "why_it_qualifies": "a consumer who changed nothing has calls allowed that were refused. Reported by drops-fi: six exact grants for its `fleet_*` tools were never read, because the verb slot held the namespace `fleet`, and each fleet offer lapsed to a paid API key while the worker could not fetch its brief."
+    },
+    {
+      "seq": 73,
+      "sha": "(this commit)",
+      "notice": true,
+      "verb": "sessionstart (the PostCompact hook) / install",
+      "change": "A PostCompact payload now gets NO output, and the shipped template no longer registers PostCompact; a re-install removes game_loop's own PostCompact entry and leaves any other hook on that event alone (#141). The rehydration after a compaction is unchanged: Claude Code runs SessionStart hooks again with source \"compact\", and that run carries the full context.",
+      "consequence": "the 'PostCompact [command hook 1] failed: Hook JSON output validation failed' line after every /compact goes away. If you read your status after compaction from the PostCompact output, it was never reaching the model; read it from the SessionStart(compact) run, which is where it always arrived.",
+      "why_it_qualifies": "a consumer who changed nothing sees a hook stop failing and a settings entry removed on re-install. Reported from the desktop app: echoing hookEventName \"PostCompact\" failed Claude Code's validation, which accepts no hookSpecificOutput for that event; read in the 2.1.318 binary, a PostCompact result only becomes a message shown to the human."
+    },
+    {
+      "seq": 74,
+      "sha": "(this commit)",
+      "notice": true,
+      "verb": "install.sh",
+      "change": "A re-install now KEEPS the repo's existing mode: a --local install re-run without --local stays --local, and says so (#142). The new --shared flag is the explicit switch to the team's install (it removes the exclude block, as omitting --local used to). --local with --shared is refused. A fresh install with no flag is still shared.",
+      "consequence": "if you relied on leaving out --local to turn a --local install into a shared one, that no longer happens: pass --shared. Upgrading with the bare command, or with --central <repo>, no longer creates a settings.json or removes your exclude block.",
+      "why_it_qualifies": "a consumer who changed nothing gets a different result from the same command. Reported: `install.sh --central <repo>`, the documented way to keep a central install current, silently converted a --central --local install to shared, with every gate registered in both settings files."
+    },
+    {
+      "seq": 75,
+      "sha": "(this commit)",
+      "notice": true,
+      "verb": "authorize",
+      "change": "a NEW refusal. With no session id in the environment (no GAME_LOOP_SESSION, no CLAUDE_CODE_SESSION_ID), and at least one session here whose write guard has run, authorize refuses instead of writing the grant to the repo-wide .game_loop/state.json (#143). The refusal lists the sessions whose guards ran most recently and prints the exact command with GAME_LOOP_SESSION filled in. GAME_LOOP_SESSION=\"\" (set and empty) still chooses the repo-wide state on purpose; with no session mark at all, the old behaviour stands.",
+      "consequence": "a human typing authorize into a terminal or the desktop app's inline shell is now refused and shown the line to run, where before they were told AUTHORIZED for a grant no guard would ever spend. An agent's own Bash already carries the id, so agents are unaffected. A test or harness that authorizes with no session id in a repo that also has hook-written sessions must pass GAME_LOOP_SESSION=\"\" to keep using the repo-wide state.",
+      "why_it_qualifies": "a consumer who changed nothing is refused a command that previously succeeded. Reported: an MCP call was refused, the human ran the suggested hatch in the desktop app's shell, saw AUTHORIZED, and the retry was refused again with 'NO grant for this tool exists in this session'."
+    },
+    {
+      "seq": 76,
+      "sha": "(this commit)",
+      "notice": true,
+      "verb": "install.sh",
+      "change": "The report on other hooks found on Stop and PreToolUse no longer says to delete them (#144). Hooks from tools the installer knows (showrunner, llm_chat) are named as coexisting and left alone; any other is listed with 'check that each one is yours'. Nothing is removed either way.",
+      "consequence": "an agent reading the install output is no longer told to switch off showrunner's guards or a project's own safety hook. The unknown-hook list still appears, so a genuine leftover is still surfaced.",
+      "why_it_qualifies": "a consumer who changed nothing sees different install output, and the old output, followed literally, disabled real gates. Reported on a repo that also runs showrunner."
     }
   ],
   "schema": 1

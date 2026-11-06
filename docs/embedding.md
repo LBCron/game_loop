@@ -12,9 +12,11 @@ your job to reimplement.** File it.
 
 - **The `PreToolUse` and `Stop` hooks**, and their registration. `install.sh` *merges* game_loop's
   hooks into `.claude/settings.json`; it does not overwrite the file. A project's `statusLine`,
-  permissions and unrelated hooks survive. The merge is idempotent, and it deliberately warns about
-  pre-existing **non-game_loop** hooks on the events it manages, because a stray `Stop` hook from an
-  older harness runs *alongside* this one and the two fight over turn-ends.
+  permissions and unrelated hooks survive. The merge is idempotent, and it deliberately reports
+  pre-existing **non-game_loop** hooks on the events it manages, because a second blocking `Stop`
+  hook runs *alongside* this one and the two can fight over turn-ends. It names hooks from tools it
+  knows (showrunner, llm_chat) as coexisting, lists any other for a human to check, and never
+  removes one. The only hook it removes is its own, when game_loop stops registering an event.
   **Do not copy that file yourself.** A wholesale copy discards the project's own settings and
   silently drops that warning.
 - **What a change owes, and whether the evidence is newer than the change.** That is `verify.yaml`

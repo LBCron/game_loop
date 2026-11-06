@@ -136,8 +136,10 @@ clean: the flag writes no tracked file, because a private decision arriving as a
 next pull is the one thing it promises not to do (#127). The installer prints which of the two modes
 it did, either way — it is a choice, not a default you discover when a colleague pulls.
 
-Omit `--local` on a later re-install to revert: the exclude block this wrote is removed, and leftover
-hooks in `settings.local.json` are **named** rather than deleted, because that file is yours.
+A re-install **keeps the mode the repo already has**, so upgrading with the bare command (or
+`--central <repo>`) never turns a `--local` install into the team's (#142). To switch it, re-install
+with `--shared`: the exclude block this wrote is removed, and leftover hooks in `settings.local.json`
+are **named** rather than deleted, because that file is yours.
 
 Installing several repos on one machine? `install.sh --central` wires a repo to run the tool from one
 shared, machine-wide location instead of copying it in — see "Central install" in

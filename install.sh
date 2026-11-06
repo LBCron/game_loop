@@ -153,7 +153,8 @@ fi
 
 usage() {
   cat <<'USAGE'
-usage: ./install.sh [--same-as <checkout>] [--fresh] [--central] [--local] [--skills|--no-skills]
+usage: ./install.sh [--same-as <checkout>] [--fresh] [--central] [--local|--shared]
+                    [--skills|--no-skills]
                     /path/to/your/project
        ./install.sh --skills-only          (user-level skills, no project touched)
        (or pipe via curl: ... | bash -s -- .)
@@ -193,11 +194,14 @@ usage: ./install.sh [--same-as <checkout>] [--fresh] [--central] [--local] [--sk
                         is added to .git/info/exclude, which is PER-CLONE, so no tracked file
                         changes and `git status` stays clean. Nothing this installs then reaches
                         anybody
-                        who clones the repo. WITHOUT this flag the install is SHARED, which is the
+                        who clones the repo. A FRESH install without it is SHARED, which is the
                         design: the payload and the gates are committed, and everyone who clones
-                        gets both. Omit on a later re-install to revert: the ignore this wrote is
-                        removed, and any leftover hooks in settings.local.json are NAMED rather
-                        than deleted, because that file is yours.
+                        gets both. A RE-install keeps whichever mode the repo already has, so an
+                        upgrade never flips it (#142).
+  --shared              make this install the TEAM's, switching a --local one over: the ignore
+                        --local wrote is removed, and any leftover hooks in settings.local.json
+                        are NAMED rather than deleted, because that file is yours. Only needed to
+                        change a --local install; a fresh one is shared already.
   --central             don't copy the tool's code into this repo at all — write 5 tiny dispatcher
                         shims that run it from a shared, machine-wide install instead (set up once
                         with `game_loop self --pin <ref> --dest ~/.claude/game_loop-central`, or
@@ -210,6 +214,7 @@ USAGE
 
 TARGET=""
 LOCAL_INSTALL=0        # --local: hooks to settings.local.json, exclude via .git/info/exclude
+SHARED_INSTALL=0       # --shared: the explicit way to turn a --local install into the team's (#142)
 OVER_VENDORED=0
 OVER_BLESSED=0
 SAME_AS=""
@@ -223,6 +228,7 @@ CONTEXT_CAP_WHY=""         # HOW the answer was reached — printed, so nothing 
 while [ $# -gt 0 ]; do
   case "$1" in
     --local)       LOCAL_INSTALL=1; shift ;;
+    --shared)      SHARED_INSTALL=1; shift ;;
     --skills)      WANT_SKILLS="yes"; shift ;;
     --no-skills)   WANT_SKILLS="no";  shift ;;
     --skills-only) SKILLS_ONLY=1; WANT_SKILLS="yes"; shift ;;
@@ -1233,6 +1239,85 @@ if c.get("project_name") in (None, "", "game_loop"):
 PY
 fi
 
+# --local's OTHER HALF. Hooks in settings.local.json reach nobody, but a committed .game_loop/ still
+# would — the payload, the state, the log. A "for me only" install that ships the harness to the team
+# anyway would be the disclosure problem again wearing a flag. Appended to the repo's own .gitignore,
+# idempotently, and only when asked: the SHARED install deliberately tracks .game_loop/ and must not
+# have it ignored out from under it.
+GI_ROOT="$TARGET/.gitignore"
+GI_MARK="# game_loop, installed with --local: for this machine only, not the team."
+
+# WHERE --local's IGNORE GOES, and this moved (#127). It used to append to the target's tracked
+# .gitignore, which is the one thing the flag promises not to do: a private decision arriving as a
+# diff on everybody's next pull. Raised by showrunner, argued better by a consumer of theirs, and
+# then MEASURED here — `git status --porcelain` after a --local install was exactly " M .gitignore",
+# the tracked file and nothing else. .git/info/exclude is git's own place for "ignore my tooling in
+# my clone without telling my teammates", it takes the same syntax including # comments, and the
+# marked-block convention the revert depends on transfers verbatim.
+#
+# RESOLVED INSIDE THE TARGET, because `rev-parse --git-common-dir` answers RELATIVE to the repo you
+# asked about — joining it to the installer's own cwd writes the WRONG repo's exclude file, and a
+# hand-check then passes by reading the file it just wrongly wrote. showrunner hit exactly that and
+# handed it over as the trap on the way here.
+# THE ANSWER MUST BE NON-EMPTY, and that is not pedantry. `cd "$(cmd)"` where cmd FAILED becomes
+# `cd ""`, which bash treats as staying put rather than erroring — so a non-repository target
+# silently resolved to the target itself and this wrote $TARGET/info/exclude, a file git never
+# reads, while printing "wrote .git/info/exclude". A false success: told the payload was ignored
+# when it was not. Found by driving the non-repo case, not by reading the diff — the third time in
+# this file's history that only a real run caught it.
+GL_EXCLUDE=""
+GL_IS_WORKTREE=0
+GL_COMMON_REL=$( cd "$TARGET" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null ) || GL_COMMON_REL=""
+if [ -n "$GL_COMMON_REL" ]; then
+  COMMON=$( cd "$TARGET" 2>/dev/null && cd "$GL_COMMON_REL" 2>/dev/null && pwd ) || COMMON=""
+  GL_GITDIR_REL=$( cd "$TARGET" 2>/dev/null && git rev-parse --git-dir 2>/dev/null ) || GL_GITDIR_REL=""
+  GITDIR=$( cd "$TARGET" 2>/dev/null && cd "$GL_GITDIR_REL" 2>/dev/null && pwd ) || GITDIR=""
+  if [ -n "$COMMON" ]; then
+    [ -n "$GITDIR" ] && [ "$COMMON" != "$GITDIR" ] && GL_IS_WORKTREE=1
+    GL_EXCLUDE="$COMMON/info/exclude"
+  fi
+fi
+
+# THE MODE IS STICKY (#142). It used to be decided by the flag on THIS run alone, so a re-install
+# that left out --local was read as "revert to shared": a repo installed with `--central --local`
+# and upgraded with `--central <repo>`, the documented way to keep a central install current, got a
+# new untracked settings.json, lost its exclude block, and had every gate registered in BOTH
+# settings files. The installer warned, after doing it. An upgrade is not a decision about who the
+# install is for, so a re-install now keeps the mode the repo already has, and changing it takes a
+# flag that says so: --local one way, --shared the other.
+#
+# PRIOR --local IS READ FROM WHAT --local WRITES: its marked block (in info/exclude, or in
+# .gitignore from before #127), or game_loop's hooks in settings.local.json with none in
+# settings.json. ".game_loop/" and not "game_loop": game_loop's hooks route through .game_loop/bin/,
+# and a bare "game_loop" also matches any path under a checkout that happens to be named that.
+if [ "$LOCAL_INSTALL" = "1" ] && [ "$SHARED_INSTALL" = "1" ]; then
+  echo "--local and --shared ask for opposite installs; pass one." >&2
+  exit 1
+fi
+PRIOR_LOCAL=0
+if [ "$FRESH" != "1" ]; then
+  for _f in "$GI_ROOT" "$GL_EXCLUDE"; do
+    if [ -n "$_f" ] && [ -f "$_f" ] && grep -qxF "$GI_MARK" "$_f" 2>/dev/null; then
+      PRIOR_LOCAL=1
+    fi
+  done
+  if [ -f "$TARGET/.claude/settings.local.json" ] \
+     && grep -qF ".game_loop/" "$TARGET/.claude/settings.local.json" 2>/dev/null \
+     && ! { [ -f "$TARGET/.claude/settings.json" ] \
+            && grep -qF ".game_loop/" "$TARGET/.claude/settings.json" 2>/dev/null; }; then
+    PRIOR_LOCAL=1
+  fi
+fi
+if [ "$SHARED_INSTALL" = "1" ]; then
+  if [ "$PRIOR_LOCAL" = "1" ]; then
+    echo "  mode    SHARED, switched from --local because --shared was passed"
+  fi
+elif [ "$LOCAL_INSTALL" != "1" ] && [ "$PRIOR_LOCAL" = "1" ]; then
+  LOCAL_INSTALL=1
+  echo "  mode    kept --local: this repo was installed for one machine, and a re-install keeps"
+  echo "          its mode (#142). Pass --shared to make it the team's instead."
+fi
+
 # Merge the hooks into the settings file, idempotently. WHICH FILE IS THE WHOLE OF --local:
 # settings.json is source-controlled and reaches everyone who clones; settings.local.json is
 # machine-local and reaches nobody. Same merge either way — only the destination changes.
@@ -1256,21 +1341,80 @@ def commands(entry):
     return [h.get("command", "") for h in entry.get("hooks", [])]
 
 
-# Warn about pre-existing NON-game_loop hooks on the events we manage. A stray Stop hook (e.g. an old
-# .loop harness) will run ALONGSIDE ours and fight over turn-ends — the merge can't tell them apart, so
-# we surface them and let the human delete the old one by hand. (game_loop's own hooks route through
-# .game_loop/bin/, so that substring is how we recognize ours.)
-foreign = []
+# Report pre-existing NON-game_loop hooks on the events we manage. They run ALONGSIDE ours, and a
+# second blocking Stop hook can fight game_loop's over turn-ends, so a human should know they are
+# there. (game_loop's own hooks route through .game_loop/bin/, so that substring is how we recognize
+# ours.)
+#
+# REPORTED, NEVER PRESCRIBED (#144). This used to say "Delete the stale ones by hand" over EVERY
+# foreign hook, and on a repo that also runs showrunner it listed showrunner's own guards (its
+# worktree, dispatch and reach gates, its GitHub waker) under that heading. An agent following the
+# advice literally would have switched off real gates. Nothing here can tell a leftover from a hook
+# somebody depends on, so it does not pretend to: tools this installer KNOWS are named as
+# coexisting, and everything else is "check whether it is yours", with the decision left to a human.
+KNOWN_SIBLINGS = (
+    ("showrunner", ("/.showrunner/", "/.showrunner_self/", "bin/showrunner")),
+    ("llm_chat", ("/llm_chat/", "llm-chat-")),
+)
+
+
+def sibling(cmd):
+    for name, marks in KNOWN_SIBLINGS:
+        if any(m in cmd for m in marks):
+            return name
+    return None
+
+
+known, unknown = {}, []
 for event in ("Stop", "PreToolUse"):
     for entry in hooks.get(event, []):
         for cmd in commands(entry):
             if cmd and ".game_loop/" not in cmd:
-                foreign.append((event, cmd))
-if foreign:
-    print("  ⚠ found existing non-game_loop hooks on managed events — these run ALONGSIDE game_loop's")
-    print("    and can fight over turn-ends. Delete the stale ones (e.g. an old .loop harness) by hand:")
-    for event, cmd in foreign:
+                who = sibling(cmd)
+                if who:
+                    known.setdefault(who, []).append(event)
+                else:
+                    unknown.append((event, cmd))
+if known:
+    print("  coexisting hooks from known tools, left as they are: "
+          + "; ".join(f"{who} ({len(evs)}: {', '.join(sorted(set(evs)))})"
+                      for who, evs in sorted(known.items())))
+if unknown:
+    print("  ⚠ other hooks on events game_loop also uses — they run ALONGSIDE game_loop's, and a")
+    print("    second blocking Stop hook can fight it over turn-ends. Nothing was changed. Check that")
+    print("    each one is yours and still wanted; this cannot tell a leftover from a gate you rely on:")
+    for event, cmd in unknown:
         print(f"      {event}: {cmd}")
+
+# RETIRE what game_loop no longer registers. The merge below only ever ADDS, so dropping an event
+# from the template would leave every existing install carrying it forever. Only game_loop's OWN
+# command is removed (it routes through .game_loop/bin/ and names the verb); anything else on the
+# event is somebody else's and stays.
+#   PostCompact (#141): a PostCompact hook's result is shown to the human and never reaches the
+#   model, and its hookSpecificOutput failed validation after every compaction. SessionStart runs
+#   again with source "compact" and carries the context, so the registration bought only an error.
+RETIRED = {"PostCompact": "game_loop sessionstart"}
+for event, verb in RETIRED.items():
+    arr = hooks.get(event)
+    if not isinstance(arr, list):
+        continue
+    kept_entries, dropped = [], 0
+    for entry in arr:
+        hs = entry.get("hooks", []) if isinstance(entry, dict) else []
+        mine = [h for h in hs if ".game_loop/" in h.get("command", "") and verb in h.get("command", "")]
+        if not mine:
+            kept_entries.append(entry)
+            continue
+        dropped += len(mine)
+        rest = [h for h in hs if h not in mine]
+        if rest:
+            kept_entries.append({**entry, "hooks": rest})
+    if dropped:
+        if kept_entries:
+            hooks[event] = kept_entries
+        else:
+            del hooks[event]
+        print(f"  retired {event} hook ({verb}): no longer registered, see #141")
 
 for event, new_entries in block.items():
     arr = hooks.setdefault(event, [])
@@ -1342,44 +1486,6 @@ elif ".game_loop/bin/game_loop" not in json.dumps(sl):
     print("    or replace your statusLine command with: " + GL_STATUSLINE)
 PY
 
-# --local's OTHER HALF. Hooks in settings.local.json reach nobody, but a committed .game_loop/ still
-# would — the payload, the state, the log. A "for me only" install that ships the harness to the team
-# anyway would be the disclosure problem again wearing a flag. Appended to the repo's own .gitignore,
-# idempotently, and only when asked: the SHARED install deliberately tracks .game_loop/ and must not
-# have it ignored out from under it.
-GI_ROOT="$TARGET/.gitignore"
-GI_MARK="# game_loop, installed with --local: for this machine only, not the team."
-
-# WHERE --local's IGNORE GOES, and this moved (#127). It used to append to the target's tracked
-# .gitignore, which is the one thing the flag promises not to do: a private decision arriving as a
-# diff on everybody's next pull. Raised by showrunner, argued better by a consumer of theirs, and
-# then MEASURED here — `git status --porcelain` after a --local install was exactly " M .gitignore",
-# the tracked file and nothing else. .git/info/exclude is git's own place for "ignore my tooling in
-# my clone without telling my teammates", it takes the same syntax including # comments, and the
-# marked-block convention the revert depends on transfers verbatim.
-#
-# RESOLVED INSIDE THE TARGET, because `rev-parse --git-common-dir` answers RELATIVE to the repo you
-# asked about — joining it to the installer's own cwd writes the WRONG repo's exclude file, and a
-# hand-check then passes by reading the file it just wrongly wrote. showrunner hit exactly that and
-# handed it over as the trap on the way here.
-# THE ANSWER MUST BE NON-EMPTY, and that is not pedantry. `cd "$(cmd)"` where cmd FAILED becomes
-# `cd ""`, which bash treats as staying put rather than erroring — so a non-repository target
-# silently resolved to the target itself and this wrote $TARGET/info/exclude, a file git never
-# reads, while printing "wrote .git/info/exclude". A false success: told the payload was ignored
-# when it was not. Found by driving the non-repo case, not by reading the diff — the third time in
-# this file's history that only a real run caught it.
-GL_EXCLUDE=""
-GL_IS_WORKTREE=0
-GL_COMMON_REL=$( cd "$TARGET" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null ) || GL_COMMON_REL=""
-if [ -n "$GL_COMMON_REL" ]; then
-  COMMON=$( cd "$TARGET" 2>/dev/null && cd "$GL_COMMON_REL" 2>/dev/null && pwd ) || COMMON=""
-  GL_GITDIR_REL=$( cd "$TARGET" 2>/dev/null && git rev-parse --git-dir 2>/dev/null ) || GL_GITDIR_REL=""
-  GITDIR=$( cd "$TARGET" 2>/dev/null && cd "$GL_GITDIR_REL" 2>/dev/null && pwd ) || GITDIR=""
-  if [ -n "$COMMON" ]; then
-    [ -n "$GITDIR" ] && [ "$COMMON" != "$GITDIR" ] && GL_IS_WORKTREE=1
-    GL_EXCLUDE="$COMMON/info/exclude"
-  fi
-fi
 
 if [ "$LOCAL_INSTALL" = "1" ]; then
   # ASK GIT, NOT ONE FILE. This used to `grep -qxF` the target's .gitignore, so a repo that ignores
@@ -1450,7 +1556,7 @@ PYGI
   # showrunner with a two-line reproduction; reproduced here before believing it.
   # NOT REPAIRED: settings.json is source-controlled and those entries may be a team's.
   if [ -f "$TARGET/.claude/settings.json" ] \
-     && grep -q "game_loop" "$TARGET/.claude/settings.json" 2>/dev/null; then
+     && grep -qF ".game_loop/" "$TARGET/.claude/settings.json" 2>/dev/null; then
     echo "  ⚠ .claude/settings.json ALSO has game_loop hooks, from an earlier shared install. The"
     echo "    two settings files MERGE rather than override, so every gate is now registered TWICE"
     echo "    and fires twice — the Stop gate included. Left alone because that file is source-"
@@ -1458,8 +1564,9 @@ PYGI
     echo "    meant to be yours alone. \`game_loop self\` will keep saying so until one side is gone."
   fi
 else
-  # THE REVERT. Re-running WITHOUT the flag used to leave every --local artifact in place, so you
-  # got a SHARED install whose payload was still ignored: it reported success and shipped nothing.
+  # THE REVERT, reached by --shared since #142 (a bare re-install keeps --local, above). Before
+  # this branch existed, a shared re-install left every --local artifact in place, so you got a
+  # SHARED install whose payload was still ignored: it reported success and shipped nothing.
   # ONLY OUR OWN MARKED BLOCK IS REMOVED, from either file — an untagged `.game_loop/` somebody
   # added themselves is THEIR line. An installer that edits files it does not own gets exactly one
   # liberty: undoing its own writes.
@@ -1493,7 +1600,7 @@ PYGI2
     echo "    or your teammates get the hooks and nothing for them to run."
   fi
   if [ -f "$TARGET/.claude/settings.local.json" ] \
-     && grep -q "game_loop" "$TARGET/.claude/settings.local.json" 2>/dev/null; then
+     && grep -qF ".game_loop/" "$TARGET/.claude/settings.local.json" 2>/dev/null; then
     echo "  ⚠ .claude/settings.local.json still has game_loop hooks from a --local install. The two"
     echo "    settings files MERGE rather than override, so every gate now runs TWICE. Delete the"
     echo "    game_loop entries there; \`game_loop self\` will keep saying so until you do."

@@ -1373,15 +1373,18 @@ def main():
               blocked.returncode == 0 and denied(blocked))
 
         print("write guard (authorize → consume):")
+        # LEGACY MODE, ON PURPOSE (#143): the guard below is called with no session id, so it spends
+        # from the repo-wide state, and GAME_LOOP_SESSION="" is how authorize chooses that state
+        # deliberately once any session here has left the write guard's mark.
         gl(wgproj, "authorize", "--path", os.path.expanduser("~/authztest"),
-               "--reason", "user said ok")
+               "--reason", "user said ok", GAME_LOOP_SESSION="")
         p = {"tool_name": "Bash", "tool_input": {"command": "touch ~/authztest/x"}}
         check("authorized path allowed once", allowed(wgproj, p))
         check("authorization is single-use (spent → denied)", denied(guard(wgproj, p)))
         # #1: the escape hatch must work for the Write/Edit tools too, not just Bash mutators —
         # the deny message points at `authorize`, so `authorize` has to unblock this path.
         gl(wgproj, "authorize", "--path", os.path.expanduser("~/authztest-write"),
-               "--reason", "user said ok")
+               "--reason", "user said ok", GAME_LOOP_SESSION="")
         pw = {"tool_name": "Write",
               "tool_input": {"file_path": os.path.expanduser("~/authztest-write/x.md")}}
         check("authorized path allowed once via Write", allowed(wgproj, pw))
@@ -1424,6 +1427,57 @@ def main():
         check("...and an ordinary allowed write says NOTHING — the notice is the exception, not a "
               "banner on every call the guard lets through",
               not denied(_ord) and "AUTHORIZATION SPENT" not in _ord.stdout)
+
+        # #143: A GRANT NO GUARD CAN SPEND. The desktop app's inline shell carries no session id,
+        # so `authorize` wrote the repo-wide legacy state and printed AUTHORIZED, while every guard
+        # reads the calling session's own state. Refused now, wherever a hook has proved it carries
+        # session ids here (the write guard's mark), with the exact line to run instead.
+        print("authorize with no session id, where hooks carry one (#143):")
+        _s143 = "sess-143-abcdef12"
+        _m143 = os.path.join(proj, ".game_loop", "sessions", _s143)
+        os.makedirs(_m143, exist_ok=True)
+        open(os.path.join(_m143, "write-guard-probe"), "w").close()
+        _legacy143 = os.path.join(proj, ".game_loop", "state.json")
+
+        def _grants_at(f, path):
+            try:
+                with open(f) as fh:
+                    return [g for g in json.load(fh).get("authorized", [])
+                            if g.get("path") == os.path.realpath(path)]
+            except (OSError, ValueError):
+                return []
+        _p143 = os.path.expanduser("~/authz-143")
+        _r143 = gl(proj, "authorize", "--path", _p143, "--reason", "yes, wire it up")
+        check("#143: with no session id, and a session here whose guards have run, authorize is "
+              "REFUSED instead of reporting AUTHORIZED for a grant no guard reads",
+              _r143.returncode != 0 and "✓ AUTHORIZED" not in _r143.stdout
+              and "no session id" in (_r143.stdout + _r143.stderr))
+        check("#143: ...and records NOTHING in the legacy state, so the refusal is not a grant "
+              "with a warning attached",
+              not _grants_at(_legacy143, _p143))
+        check("#143: ...and prints the exact line to run, with that session's id filled in — the "
+              "one thing the human could not see",
+              ("GAME_LOOP_SESSION=" + _s143) in (_r143.stdout + _r143.stderr)
+              and "authz-143" in (_r143.stdout + _r143.stderr))
+        _r143b = gl(proj, "authorize", "--path", _p143, "--reason", "yes, wire it up", sid=_s143)
+        check("#143: ...and that line WORKS: with the id set the grant lands in that session's own "
+              "state, where its guard spends it",
+              _r143b.returncode == 0 and _grants_at(os.path.join(_m143, "state.json"), _p143)
+              and not denied(guard(proj, {"session_id": _s143, "tool_name": "Bash",
+                                          "tool_input": {"command": "touch ~/authz-143/x"}})))
+        _r143c = gl(proj, "authorize", "--path", _p143 + "-legacy", "--reason", "yes",
+                    GAME_LOOP_SESSION="")
+        check("#143: GAME_LOOP_SESSION set and EMPTY still chooses the legacy state on purpose, "
+              "the documented opt-out",
+              _r143c.returncode == 0 and _grants_at(_legacy143, _p143 + "-legacy"))
+        shutil.rmtree(_m143, ignore_errors=True)
+        _r143d = gl(proj, "authorize", "--path", _p143 + "-nohooks", "--reason", "yes")
+        check("#143: the refusal also names the deliberate legacy route, for a harness whose hooks "
+              "really carry no session id",
+              'GAME_LOOP_SESSION=""' in (_r143.stdout + _r143.stderr))
+        check("#143: ...and where NO hook has left a session mark (a harness without session ids, "
+              "which spends from the legacy state), the old behaviour stands",
+              _r143d.returncode == 0 and _grants_at(_legacy143, _p143 + "-nohooks"))
 
         # THE HATCH USED AS A CONFIG SUBSTITUTE. Observed in this repo's own log: 22 grants under
         # ONE identical reason, one per repo, against 4 spends in the whole file. LOUD, never a
@@ -1707,8 +1761,11 @@ def main():
               "command position only, which is the whole difference from the deploy-verb matcher",
               allowed(wgproj, {"tool_name": "Bash", "tool_input": {
                   "command": 'git commit -m "see gh issue comment for the rule"'}}))
+        # LEGACY MODE, ON PURPOSE (#143): the guard below is called with no session id, so it spends
+        # from the repo-wide state, and GAME_LOOP_SESSION="" is how authorize chooses that state
+        # deliberately once any session here has left the write guard's mark.
         _ghauth = gl(wgproj, "authorize", "--path", "gh issue comment",
-                     "--reason", "the human said to, in these words")
+                     "--reason", "the human said to, in these words", GAME_LOOP_SESSION="")
         check("...and a HUMAN authorization opens it — the same hatch, at the same cost, as the "
               "MCP door, rather than a second mechanism with its own rules",
               _ghauth.returncode == 0 and allowed(wgproj, {"tool_name": "Bash", "tool_input": {
@@ -5400,7 +5457,11 @@ def main():
             f.write(mcp_impl_src)
 
         print("MCP guard (authorize → consume):")
-        gl(proj, "authorize", "--path", "mcp__mail__deleteMessage", "--reason", "user said ok")
+        # LEGACY MODE, ON PURPOSE (#143): the guard below is called with no session id, so it spends
+        # from the repo-wide state, and GAME_LOOP_SESSION="" is how authorize chooses that state
+        # deliberately once any session here has left the write guard's mark.
+        gl(proj, "authorize", "--path", "mcp__mail__deleteMessage", "--reason", "user said ok",
+           GAME_LOOP_SESSION="")
         pm = {"tool_name": "mcp__mail__deleteMessage", "tool_input": {"id": "abc"}}
         check("an authorized MCP tool is allowed once", not denied(mcpguard(pm)))
         check("the MCP authorization is single-use (spent → denied)", denied(mcpguard(pm)))
@@ -9787,10 +9848,21 @@ def main():
               "one — and it produced the context while not blocking, since exit 0 is also what a "
               "binary that does nothing returns",
               r.returncode == 0 and bool(dig(_out, "additionalContext")))
-        check("...and PostCompact is served by the same verb, because compaction is exactly when a "
-              "run loses the mandate, the pins and the invariants",
-              dig(json_text(_start(event="PostCompact").stdout), "hookSpecificOutput", "hookEventName")
-              == "PostCompact")
+        # #141: a PostCompact hook's hookSpecificOutput is validated against an event list that
+        # PostCompact is not in, and its result reaches only the human. Echoing the event name
+        # failed after every compaction. SessionStart(compact) carries the context instead.
+        _pc = _start(event="PostCompact", source="compact")
+        check("#141: a PostCompact payload gets NO output — echoing hookEventName \"PostCompact\" "
+              "failed Claude Code's validation after every compaction, and its result never reaches "
+              "the model anyway",
+              _pc.returncode == 0 and _pc.stdout.strip() == "")
+        _sc = dig(json_text(_start(event="SessionStart", source="compact").stdout),
+                  "hookSpecificOutput")
+        check("#141: ...while the SessionStart run Claude Code makes AFTER a compaction "
+              "(source: compact) carries the full context, labelled SessionStart — the control that "
+              "the silence above is not rehydration lost",
+              dig(_sc, "hookEventName") == "SessionStart"
+              and has(dig(_sc, "additionalContext"), "COST LADDER"))
         check("...and the firing is RECORDED, or this is the statusline tap again — a check whose "
               "silence cannot be told from never having run",
               os.path.isfile(_ssprobe))
@@ -9889,7 +9961,7 @@ def main():
               '"source": "startup"' in _ssctx(_on) and '"event": "session_start"' in _ssctx(_on))
         check("...and a COMPACTION says compact rather than startup — the arm that makes the field "
               "worth branching on instead of a constant dressed as a discriminator",
-              '"source": "compact"' in _ssctx(_start(event="PostCompact", source="compact")))
+              '"source": "compact"' in _ssctx(_start(event="SessionStart", source="compact")))
 
         # THREE OUTCOMES, THREE READINGS. Failed, timed out, and ran-but-printed-nothing are three
         # different states, and an attachment whose silence cannot be told from never having run is
@@ -9948,10 +10020,12 @@ def main():
     # Registered where it ships, not only where this repo runs it.
     with open(os.path.join(REPO, "templates", "settings.hooks.json")) as f:
         _tpl = json.load(f)["hooks"]
-    check("the shipped template registers BOTH moments, so an install gets them without asking",
-          all(any("sessionstart" in h.get("command", "")
-                  for e in _tpl.get(ev, []) for h in e.get("hooks", []))
-              for ev in ("SessionStart", "PostCompact")))
+    check("the shipped template registers the session entry point, so an install gets it without "
+          "asking (it also runs after a compaction, as SessionStart with source compact)",
+          any("sessionstart" in h.get("command", "")
+              for e in _tpl.get("SessionStart", []) for h in e.get("hooks", [])))
+    check("#141: ...and does NOT register PostCompact, whose result never reaches the model",
+          "PostCompact" not in _tpl)
 
     # THE ESCAPE HATCH MUST NAME SOMETHING THAT EXISTS (#52). Every refusal told the agent to run
     # `game_loop authorize`, and game_loop is NEVER on PATH — it is a project-local binary. A
@@ -16094,6 +16168,47 @@ def main():
     _reinstall(_shared_d)
     check("...and never LOWERS one a consumer raised further",
           _stopgate_timeouts(_shared_d) == [300])
+    # #141: RETIRED, NOT LEFT. The merge only ever added, so an install from before #141 would carry
+    # the PostCompact registration forever. A re-install removes game_loop's OWN entry and nothing
+    # else on the event.
+    _sf141 = os.path.join(_shared_d, ".claude", "settings.json")
+    with open(_sf141) as f:
+        _sj141 = json.load(f)
+    _ss_cmd = [h["command"] for g in _sj141["hooks"]["SessionStart"] for h in g["hooks"]
+               if "sessionstart" in h["command"]][0]
+    _sj141["hooks"]["PostCompact"] = [
+        {"hooks": [{"type": "command", "command": _ss_cmd, "timeout": 20}]},
+        {"hooks": [{"type": "command", "command": "echo someone-elses-postcompact"}]}]
+    # #144: another tool's hooks, and one nobody here recognises, on events game_loop manages.
+    _sj141["hooks"].setdefault("PreToolUse", []).append(
+        {"hooks": [{"type": "command",
+                    "command": '"$CLAUDE_PROJECT_DIR"/.showrunner/hooks/worktree-guard.sh'}]})
+    _sj141["hooks"].setdefault("Stop", []).append(
+        {"hooks": [{"type": "command", "command": "node ./.git/hooks/no-bypass.mjs"}]})
+    _sj141["hooks"]["Stop"].append(
+        {"hooks": [{"type": "command", "command": "/x/.lamp/llm_chat/bin/llm-chat-wake",
+                    "asyncRewake": True}]})
+    with open(_sf141, "w") as f:
+        json.dump(_sj141, f)
+    _re141 = _reinstall(_shared_d)
+    with open(_sf141) as f:
+        _pc141 = json.load(f)["hooks"].get("PostCompact") or []
+    _pc_cmds = [h["command"] for g in _pc141 for h in g["hooks"]]
+    check("#141: a re-install RETIRES game_loop's own PostCompact hook, and says so",
+          _ss_cmd not in _pc_cmds and "retired PostCompact" in _re141)
+    check("#141: ...and leaves another tool's PostCompact hook exactly where it was — only "
+          "game_loop's own command is ours to remove",
+          _pc_cmds == ["echo someone-elses-postcompact"])
+    check("#144: showrunner's guard is reported as COEXISTING, named, and never as something to "
+          "delete — the old wording told an agent to switch off real gates",
+          "coexisting hooks from known tools" in _re141 and "showrunner (1: PreToolUse)" in _re141
+          and "worktree-guard.sh" not in _re141 and "Delete the stale" not in _re141)
+    check("#144: ...and llm_chat's waker is named as coexisting too — the second known tool, and "
+          "the one an owner agent's repo carries on its Stop event",
+          "llm_chat (1: Stop)" in _re141 and "llm-chat-wake" not in _re141)
+    check("#144: ...while an UNRECOGNISED hook is still listed, so the report did not go quiet: "
+          "it is named, with 'check that each one is yours' rather than an instruction to delete",
+          "no-bypass.mjs" in _re141 and "Check that" in _re141 and "Nothing was changed" in _re141)
     _local_d, _local_out = _install_into("--local")
     check("#122: --local writes .claude/settings.local.json INSTEAD, so nothing installed reaches "
           "anybody who clones",
@@ -16144,10 +16259,36 @@ def main():
     # payload was still gitignored — it reported success and shipped nothing to the team, and no
     # verb caught that. (The hook half at least surfaces later: `self` says hooks are in both files
     # and every gate runs twice.)
-    _revert_out = subprocess.run(
+    #
+    # #142: THE MODE IS STICKY. A re-install that just left the flag out (`install.sh --central
+    # <repo>`, the documented upgrade) used to BE the revert: a new untracked settings.json, the
+    # exclude block gone, every gate registered twice. So a bare re-install keeps --local, and the
+    # revert below takes --shared, a flag that says it.
+    _keep_out = subprocess.run(
         ["bash", os.path.join(REPO, "install.sh"), _local_d],
         capture_output=True, text=True, env=_env(), stdin=subprocess.DEVNULL).stdout
-    check("re-installing WITHOUT --local removes the exclude this installer wrote — otherwise the "
+    check("#142: a re-install WITHOUT a mode flag KEEPS --local — no settings.json is created, the "
+          "exclude stays, and it says it kept the mode and how to change it",
+          not os.path.isfile(os.path.join(_local_d, ".claude", "settings.json"))
+          and subprocess.run(["git", "check-ignore", "-q", ".game_loop/"],
+                             cwd=_local_d).returncode == 0
+          and "kept --local" in _keep_out and "--shared" in _keep_out)
+    check("#142: ...and the tree is still completely clean, which is what the upgrade has to leave",
+          subprocess.run(["git", "status", "--porcelain"], cwd=_local_d, capture_output=True,
+                         text=True).stdout.strip() == "")
+    check("#142: ...while a FRESH install with no flag is still SHARED — the control that 'keeps "
+          "its mode' did not become 'always local'",
+          os.path.isfile(os.path.join(_shared_d, ".claude", "settings.json"))
+          and "kept --local" not in _shared_out)
+    _both = subprocess.run(["bash", os.path.join(REPO, "install.sh"), "--local", "--shared",
+                            _local_d], capture_output=True, text=True, env=_env(),
+                           stdin=subprocess.DEVNULL)
+    check("#142: --local with --shared is refused rather than resolved by flag order",
+          _both.returncode != 0 and "opposite" in (_both.stdout + _both.stderr))
+    _revert_out = subprocess.run(
+        ["bash", os.path.join(REPO, "install.sh"), "--shared", _local_d],
+        capture_output=True, text=True, env=_env(), stdin=subprocess.DEVNULL).stdout
+    check("re-installing with --shared removes the exclude this installer wrote — otherwise the "
           "SHARED install it just performed ships nothing to the team while reporting success",
           subprocess.run(["git", "check-ignore", "-q", ".game_loop/"], cwd=_local_d).returncode != 0
           and "removed" in _revert_out)
@@ -19528,8 +19669,8 @@ def main():
     _gen = sorted({l.strip() for l in _sbmod.self_hooks_block(
                        os.path.join(REPO, PIN_DIRNAME_FOR_TEST, ".game_loop"))
                    if l.strip().startswith('d="$CLAUDE_PROJECT_DIR/')})
-    # Compared as SETS: one command legitimately serves two events (SessionStart and PostCompact
-    # run the same verb), so a list comparison would fail on the duplicate rather than on drift.
+    # Compared as SETS: one command may legitimately serve more than one event, so a list
+    # comparison would fail on the duplicate rather than on drift.
     check("the wiring `self` generates is byte-identical to the wiring settings.json carries",
           _gen and _gen == sorted(set(_cmds)))
     # And the tool must SAY it, not leave the comparison to this suite — a consumer has no suite,

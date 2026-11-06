@@ -695,6 +695,23 @@ MUTANTS = [
      "2026-11-05 on d30a687 plus this change, in a CLONE, by neutering by hand and listing the suite's "
      "FAIL rows: 11, of which 2 are this sweep's own bookkeeping rows (the new producers were not yet "
      "entered), so the floor is the 9.", 9),
+    ("sessionless_grant_refusal -> every sessionless grant is recorded, spendable or not",
+     ".game_loop/bin/_gl_impl.py::sessionless_grant_refusal", "    return None\n",
+     ['authorize is REFUSED instead of reporting AUTHORIZED', 'records NOTHING in the legacy state',
+      'prints the exact line to run', 'names the deliberate legacy route'],
+     "NEUTERED TO None IS THE REPORTED WORLD (#143): AUTHORIZED printed for a grant in the repo-wide "
+     "state, which no guard reads once hooks carry session ids. MEASURED 2026-11-06 at 48d6021 plus this change, in a CLONE, by neutering by hand and listing the suite's FAIL rows: 6, of which 2 are this sweep's own bookkeeping rows (install.sh::sibling and _grants_at were not yet entered), so the floor is the 4.", 4),
+    ("recent_hooked_sessions -> no session here has ever had its guards run",
+     ".game_loop/bin/_gl_impl.py::recent_hooked_sessions", "    return []\n",
+     ['authorize is REFUSED instead of reporting AUTHORIZED', 'records NOTHING in the legacy state',
+      'prints the exact line to run', 'names the deliberate legacy route'],
+     "EMPTY IS THE NO-EVIDENCE ANSWER, and it reopens #143 by the other door: with no session proved "
+     "to carry ids, the sessionless grant goes to the legacy state again. MEASURED 2026-11-06 at 48d6021 plus this change, in a CLONE, by neutering by hand and listing the suite's FAIL rows: 6, of which 2 are this sweep's own bookkeeping rows (install.sh::sibling and _grants_at were not yet entered), so the floor is the 4.", 4),
+    ("install.sh sibling -> no hook is ever recognised as a known tool's",
+     "install.sh::sibling", "    return None\n",
+     ["showrunner's guard is reported as COEXISTING", "llm_chat's waker is named as coexisting"],
+     "NEUTERED, EVERY KNOWN TOOL'S HOOK IS 'UNRECOGNISED' AGAIN (#144): listed for a human to check "
+     "instead of named as coexisting. MEASURED 2026-11-06 at 48d6021 plus this change, in a CLONE, by neutering by hand and listing the suite's FAIL rows: 2, both #144's, with the bookkeeping rows clean. A first measurement read 1 before the llm_chat row existed.", 2),
     ("watchdog fresh_snapshot -> no snapshot is ever fresh enough to start a park",
      ".game_loop/bin/watchdog::fresh_snapshot", "    return None\n",
      ['park, then ring at reset', 'starts a fresh ring budget', 'park and resume both page',
@@ -2301,6 +2318,9 @@ NOT_SWEPT = {
                               "rather than pass, which is the safe direction and the reason it is "
                               "not swept — the same call as read_or_empty above.",
     "test/run.py::_ssctx": "a suite fixture helper",
+    "test/run.py::_grants_at": "a suite helper reading a state file's grants for #143: neutered to "
+                               "an empty list it reddens the assertions that expect a grant, the "
+                               "safe direction, as read_or_empty above.",
     "test/run.py::_ask": "a suite fixture helper",
     "test/run.py::_hwlog": "a suite helper polling the hold sandbox's log: neutered to False it "
                            "reddens the assertions that wait on it, which is the safe direction",
